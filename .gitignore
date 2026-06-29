@@ -1,0 +1,19 @@
+# Build and test output
+work/
+outputs/**/*.exe
+outputs/**/*.zip
+
+# Local logs and temporary files
+*.log
+*.tmp
+*.bak
+
+# Visual Studio / editor state
+.vs/
+.vscode/
+*.user
+*.suo
+
+# Windows metadata
+Thumbs.db
+Desktop.ini
