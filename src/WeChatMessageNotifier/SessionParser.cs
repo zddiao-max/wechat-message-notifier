@@ -20,6 +20,10 @@ namespace WeChatMessageNotifier
             @"^(?:\d{1,2}/\d{1,2}|昨天|前天|星期[一二三四五六日天]|周[一二三四五六日天]|刚刚)$",
             RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
+        private static readonly Regex UnreadCountPattern = new Regex(
+            @"^(?:\[\s*(?<bracket>\d+)\s*条?\s*\]|(?<label>\d+)\s*条(?:未读(?:消息)?|新消息))$",
+            RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
         private static readonly HashSet<string> StatusLines = new HashSet<string>(
             new[]
             {
@@ -28,11 +32,15 @@ namespace WeChatMessageNotifier
                 "消息免打扰",
                 "免打扰",
                 "静音",
-                "折叠的聊天"
+                "折叠的聊天",
+                "有新消息",
+                "以下为新消息",
+                "有人@我",
+                "@我"
             },
             StringComparer.Ordinal);
 
-        internal static ChatSession Parse(string rawName, int position)
+        internal static ChatSession Parse(string rawName, int position, string automationId = null)
         {
             if (string.IsNullOrWhiteSpace(rawName))
             {
@@ -54,9 +62,34 @@ namespace WeChatMessageNotifier
             }
 
             var contact = lines[0];
+            const string SessionItemPrefix = "session_item_";
+            if (!string.IsNullOrWhiteSpace(automationId) &&
+                automationId.StartsWith(SessionItemPrefix, StringComparison.Ordinal) &&
+                automationId.Length > SessionItemPrefix.Length)
+            {
+                // WeChat 4.x exposes a stable session identity through the
+                // AutomationId. Reuse it instead of presentation text that can
+                // gain or lose pin/unread labels between UI refreshes.
+                contact = automationId.Substring(SessionItemPrefix.Length);
+            }
+
             var timestampIndex = -1;
+            var unreadCount = -1;
             for (var index = 1; index < lines.Count; index++)
             {
+                var unreadMatch = UnreadCountPattern.Match(lines[index]);
+                if (unreadMatch.Success)
+                {
+                    var value = unreadMatch.Groups["bracket"].Success
+                        ? unreadMatch.Groups["bracket"].Value
+                        : unreadMatch.Groups["label"].Value;
+                    int parsedUnreadCount;
+                    if (int.TryParse(value, out parsedUnreadCount))
+                    {
+                        unreadCount = parsedUnreadCount;
+                    }
+                }
+
                 if (IsTimestamp(lines[index]))
                 {
                     timestampIndex = index;
@@ -70,13 +103,18 @@ namespace WeChatMessageNotifier
             var previewParts = new List<string>();
             for (var index = 1; index < previewEnd; index++)
             {
-                if (!StatusLines.Contains(lines[index]))
+                if (!IsPresentationOnly(lines[index]))
                 {
                     previewParts.Add(lines[index]);
                 }
             }
 
-            var preview = string.Join(" ", previewParts.ToArray()).Trim();
+            // WeChat may expose unread counters and other presentation labels
+            // before the preview. The last meaningful line is the actual
+            // session summary and remains stable while those labels change.
+            var preview = previewParts.Count > 0
+                ? previewParts[previewParts.Count - 1].Trim()
+                : string.Empty;
             if (preview.Length == 0)
             {
                 preview = "收到一条新消息";
@@ -88,8 +126,11 @@ namespace WeChatMessageNotifier
                 Contact = contact,
                 Preview = preview,
                 Timestamp = timestamp,
+                UnreadCount = unreadCount,
                 Position = position,
-                Signature = Hash(contact + "\n" + preview + "\n" + timestamp)
+                // Timestamp text is presentation state: "刚刚" later becomes
+                // a clock time even though the message itself did not change.
+                Signature = Hash(contact + "\n" + preview)
             };
         }
 
@@ -125,6 +166,11 @@ namespace WeChatMessageNotifier
         private static bool IsTimestamp(string value)
         {
             return ClockPattern.IsMatch(value) || DatePattern.IsMatch(value);
+        }
+
+        private static bool IsPresentationOnly(string value)
+        {
+            return StatusLines.Contains(value) || UnreadCountPattern.IsMatch(value);
         }
 
         private static string Hash(string value)

@@ -5,6 +5,7 @@ using System;
 using System.Drawing;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Windows.Forms;
 
 namespace WeChatMessageNotifier
 {
@@ -23,7 +24,11 @@ namespace WeChatMessageNotifier
         internal const uint SwpShowWindow = 0x0040;
         private const int GwlExStyle = -20;
         private const int WsExTopmost = 0x00000008;
-        private const uint GaRoot = 2;
+        private const int DwmwaWindowCornerPreference = 33;
+        private const int DwmwaSystemBackdropType = 38;
+        private const int DwmwaCloaked = 14;
+        private const int DwmwcpRound = 2;
+        private const int DwmsbtTransientWindow = 3;
 
         [DllImport("user32.dll")]
         internal static extern bool EnumWindows(EnumWindowsProc callback, IntPtr lParam);
@@ -63,12 +68,6 @@ namespace WeChatMessageNotifier
             uint flags);
 
         [DllImport("user32.dll")]
-        private static extern IntPtr WindowFromPoint(NativePoint point);
-
-        [DllImport("user32.dll")]
-        private static extern IntPtr GetAncestor(IntPtr hWnd, uint flags);
-
-        [DllImport("user32.dll")]
         private static extern int GetWindowLong(IntPtr hWnd, int index);
 
         [DllImport("user32.dll")]
@@ -76,6 +75,48 @@ namespace WeChatMessageNotifier
 
         [DllImport("user32.dll", CharSet = CharSet.Unicode)]
         internal static extern int GetClassName(IntPtr hWnd, StringBuilder className, int maxCount);
+
+        [DllImport("dwmapi.dll")]
+        private static extern int DwmSetWindowAttribute(
+            IntPtr hWnd,
+            int attribute,
+            ref int value,
+            int valueSize);
+
+        [DllImport("dwmapi.dll")]
+        private static extern int DwmGetWindowAttribute(
+            IntPtr hWnd,
+            int attribute,
+            out int value,
+            int valueSize);
+
+        internal static void ApplyWindows11PopupStyle(IntPtr hWnd)
+        {
+            // These calls are best-effort. Older Windows versions simply
+            // ignore unsupported attributes and keep the opacity fallback.
+            try
+            {
+                var cornerPreference = DwmwcpRound;
+                DwmSetWindowAttribute(
+                    hWnd,
+                    DwmwaWindowCornerPreference,
+                    ref cornerPreference,
+                    sizeof(int));
+
+                var backdropType = DwmsbtTransientWindow;
+                DwmSetWindowAttribute(
+                    hWnd,
+                    DwmwaSystemBackdropType,
+                    ref backdropType,
+                    sizeof(int));
+            }
+            catch (DllNotFoundException)
+            {
+            }
+            catch (EntryPointNotFoundException)
+            {
+            }
+        }
 
         internal static string ReadClassName(IntPtr hWnd)
         {
@@ -90,52 +131,90 @@ namespace WeChatMessageNotifier
             out Rectangle rectangle)
         {
             rectangle = Rectangle.Empty;
-            // WindowFromPoint lets the notifier discover a QQ or Windows toast
-            // that was placed above our persistent popup.
-            var window = WindowFromPoint(new NativePoint { X = point.X, Y = point.Y });
-            if (window == IntPtr.Zero)
+            var workingArea = Screen.FromPoint(point).WorkingArea;
+            var foundRectangle = Rectangle.Empty;
+            // Enumerate top-level windows instead of using WindowFromPoint.
+            // Our popup reasserts TOPMOST regularly and can otherwise hide the
+            // tray overflow panel before WindowFromPoint gets a chance to see
+            // it. Enumeration still finds that panel underneath our window.
+            EnumWindows(delegate(IntPtr candidate, IntPtr ignored)
             {
-                return false;
-            }
+                if (!IsWindowVisible(candidate))
+                {
+                    return true;
+                }
 
-            var root = GetAncestor(window, GaRoot);
-            if (root == IntPtr.Zero)
-            {
-                root = window;
-            }
+                // Windows 11 keeps some closed XAML flyouts alive as visible
+                // top-level windows but marks them cloaked in DWM. Treating
+                // those dormant hosts as an obstruction prevents the popup
+                // from ever animating back down.
+                int cloaked;
+                if (DwmGetWindowAttribute(
+                        candidate,
+                        DwmwaCloaked,
+                        out cloaked,
+                        sizeof(int)) == 0 &&
+                    cloaked != 0)
+                {
+                    return true;
+                }
 
-            uint processId;
-            GetWindowThreadProcessId(root, out processId);
-            if (processId == (uint)currentProcessId)
-            {
-                return false;
-            }
+                uint processId;
+                GetWindowThreadProcessId(candidate, out processId);
+                if (processId == (uint)currentProcessId)
+                {
+                    return true;
+                }
 
-            var extendedStyle = GetWindowLong(root, GwlExStyle);
-            if ((extendedStyle & WsExTopmost) == 0)
-            {
-                return false;
-            }
+                NativeRect nativeRect;
+                if (!GetWindowRect(candidate, out nativeRect))
+                {
+                    return true;
+                }
 
-            NativeRect nativeRect;
-            if (!GetWindowRect(root, out nativeRect))
-            {
-                return false;
-            }
+                var candidateRectangle = Rectangle.FromLTRB(
+                    nativeRect.Left,
+                    nativeRect.Top,
+                    nativeRect.Right,
+                    nativeRect.Bottom);
+                if (candidateRectangle.Width <= 0 ||
+                    candidateRectangle.Height <= 0 ||
+                    !candidateRectangle.Contains(point))
+                {
+                    return true;
+                }
 
-            rectangle = Rectangle.FromLTRB(
-                nativeRect.Left,
-                nativeRect.Top,
-                nativeRect.Right,
-                nativeRect.Bottom);
-            return rectangle.Width > 0 && rectangle.Height > 0;
-        }
+                var className = ReadClassName(candidate);
+                var trayOverflow =
+                    className.IndexOf("NotifyIconOverflowWindow", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    className.IndexOf("TopLevelWindowForOverflowXamlIsland", StringComparison.OrdinalIgnoreCase) >= 0;
 
-        [StructLayout(LayoutKind.Sequential)]
-        private struct NativePoint
-        {
-            internal int X;
-            internal int Y;
+                var extendedStyle = GetWindowLong(candidate, GwlExStyle);
+                var topmost = (extendedStyle & WsExTopmost) != 0;
+                // A real QQ/Windows toast is a relatively small window anchored
+                // to the lower-right work area. Clipboard history and other
+                // XAML panels may expose a large or screen-sized topmost host;
+                // those remain excluded.
+                var notificationSized =
+                    candidateRectangle.Width <= Math.Min(640, workingArea.Width / 2) &&
+                    candidateRectangle.Height <= Math.Min(320, workingArea.Height / 3);
+                var rightAnchored =
+                    Math.Abs(workingArea.Right - candidateRectangle.Right) <= 96;
+                var bottomAnchored =
+                    Math.Abs(workingArea.Bottom - candidateRectangle.Bottom) <= 160;
+
+                if (trayOverflow ||
+                    (topmost && notificationSized && rightAnchored && bottomAnchored))
+                {
+                    foundRectangle = candidateRectangle;
+                    return false;
+                }
+
+                return true;
+            }, IntPtr.Zero);
+
+            rectangle = foundRectangle;
+            return foundRectangle != Rectangle.Empty;
         }
 
         [StructLayout(LayoutKind.Sequential)]

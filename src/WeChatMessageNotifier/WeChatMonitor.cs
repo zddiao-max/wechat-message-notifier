@@ -75,16 +75,18 @@ namespace WeChatMessageNotifier
                 for (var index = 0; index < rawItems.Count; index++)
                 {
                     string name;
+                    string automationId;
                     try
                     {
                         name = rawItems[index].Current.Name;
+                        automationId = rawItems[index].Current.AutomationId;
                     }
                     catch (ElementNotAvailableException)
                     {
                         continue;
                     }
 
-                    var session = SessionParser.Parse(name, index);
+                    var session = SessionParser.Parse(name, index, automationId);
                     if (session != null)
                     {
                         sessions.Add(session);

@@ -10,6 +10,7 @@ namespace WeChatMessageNotifier
         internal string Preview { get; set; }
         internal string Timestamp { get; set; }
         internal string Signature { get; set; }
+        internal int UnreadCount { get; set; }
         internal int Position { get; set; }
     }
 }

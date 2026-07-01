@@ -3,6 +3,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.IO;
 
 namespace WeChatMessageNotifier
 {
@@ -14,8 +15,13 @@ namespace WeChatMessageNotifier
         {
             var failures = new List<string>();
             TestParser(failures);
+            TestParserIgnoresPresentationNoise(failures);
             TestChangeDetection(failures);
+            TestDuplicateSuppression(failures);
+            TestDuplicateCooldown(failures);
             TestOutgoingFilter(failures);
+            TestPopupLifetime(failures);
+            TestLogRotation(failures);
 
             if (failures.Count == 0)
             {
@@ -47,6 +53,31 @@ namespace WeChatMessageNotifier
             Expect(session.Timestamp == "12:34", "Timestamp parsing failed.", failures);
         }
 
+        private static void TestParserIgnoresPresentationNoise(ICollection<string> failures)
+        {
+            var session = SessionParser.Parse(
+                "联系人乙\n已置顶\n[3条]\n真正的消息摘要\n刚刚\n消息免打扰",
+                0,
+                "session_item_稳定联系人");
+
+            Expect(session != null, "Noisy session parser returned null.", failures);
+            if (session != null)
+            {
+                Expect(
+                    session.Contact == "稳定联系人",
+                    "Stable session AutomationId was not reused.",
+                    failures);
+                Expect(
+                    session.Preview == "真正的消息摘要",
+                    "Presentation metadata leaked into the message preview.",
+                    failures);
+                Expect(
+                    session.UnreadCount == 3,
+                    "Unread message count was not parsed.",
+                    failures);
+            }
+        }
+
         private static void TestChangeDetection(ICollection<string> failures)
         {
             var detector = new SessionChangeDetector();
@@ -62,11 +93,154 @@ namespace WeChatMessageNotifier
             Expect(third.Count == 0, "Duplicate session generated a notification.", failures);
         }
 
+        private static void TestDuplicateSuppression(ICollection<string> failures)
+        {
+            var detector = new SessionChangeDetector();
+            var baseline = SessionParser.Parse("联系人乙\n同一条消息\n刚刚", 0);
+            detector.Update(new[] { baseline }, new DateTime(2026, 7, 1, 9, 20, 0));
+
+            var timestampChanged = SessionParser.Parse(
+                "联系人乙\n2条新消息\n同一条消息\n9:20",
+                0);
+            var timestampResult = detector.Update(
+                new[] { timestampChanged },
+                new DateTime(2026, 7, 1, 9, 20, 30));
+            Expect(
+                timestampResult.Count == 0,
+                "Timestamp presentation change generated a duplicate notification.",
+                failures);
+
+            detector.Update(new ChatSession[0], new DateTime(2026, 7, 1, 9, 20, 32));
+            var reappeared = detector.Update(
+                new[] { timestampChanged },
+                new DateTime(2026, 7, 1, 9, 20, 34));
+            Expect(
+                reappeared.Count == 0,
+                "A temporary empty scan generated a duplicate notification.",
+                failures);
+
+            var newMessage = SessionParser.Parse("联系人乙\n另一条消息\n9:21", 0);
+            var changed = detector.Update(
+                new[] { newMessage },
+                new DateTime(2026, 7, 1, 9, 21, 0));
+            Expect(changed.Count == 1, "A genuinely changed message was suppressed.", failures);
+
+            var counterDetector = new SessionChangeDetector();
+            var oneUnread = SessionParser.Parse("联系人丙\n[1条]\n重复文字\n9:21", 0);
+            counterDetector.Update(new[] { oneUnread }, new DateTime(2026, 7, 1, 9, 21, 0));
+            var sameCounterDifferentText = SessionParser.Parse(
+                "联系人丙\n[1条]\n界面临时文本\n9:21",
+                0);
+            var noiseResult = counterDetector.Update(
+                new[] { sameCounterDifferentText },
+                new DateTime(2026, 7, 1, 9, 21, 2));
+            Expect(
+                noiseResult.Count == 0,
+                "Content fluctuation with an unchanged unread count generated a notification.",
+                failures);
+
+            var twoUnreadSameText = SessionParser.Parse("联系人丙\n[2条]\n界面临时文本\n9:21", 0);
+            var repeatedTextResult = counterDetector.Update(
+                new[] { twoUnreadSameText },
+                new DateTime(2026, 7, 1, 9, 21, 4));
+            Expect(
+                repeatedTextResult.Count == 1,
+                "An increased unread count with repeated text was suppressed.",
+                failures);
+
+            var partialDetector = new SessionChangeDetector();
+            var contactA = SessionParser.Parse("联系人甲\n消息甲\n9:21", 0);
+            var contactB = SessionParser.Parse("联系人乙\n消息乙\n9:21", 1);
+            partialDetector.Update(
+                new[] { contactA, contactB },
+                new DateTime(2026, 7, 1, 9, 21, 0));
+            partialDetector.Update(
+                new[] { contactA },
+                new DateTime(2026, 7, 1, 9, 21, 2));
+            var partialResult = partialDetector.Update(
+                new[] { contactA, contactB },
+                new DateTime(2026, 7, 1, 9, 21, 4));
+            Expect(
+                partialResult.Count == 0,
+                "A session returning after a partial scan generated a duplicate.",
+                failures);
+        }
+
+        private static void TestDuplicateCooldown(ICollection<string> failures)
+        {
+            var detector = new SessionChangeDetector();
+            var baseline = SessionParser.Parse("联系人丁\n[0条]\n旧消息\n9:30", 0);
+            detector.Update(new[] { baseline }, new DateTime(2026, 7, 1, 9, 30, 0));
+
+            var first = SessionParser.Parse("联系人丁\n[1条]\n相同摘要\n9:31", 0);
+            var firstResult = detector.Update(
+                new[] { first },
+                new DateTime(2026, 7, 1, 9, 31, 0));
+            Expect(firstResult.Count == 1, "First notification was suppressed.", failures);
+
+            var read = SessionParser.Parse("联系人丁\n[0条]\n相同摘要\n9:31", 0);
+            detector.Update(new[] { read }, new DateTime(2026, 7, 1, 9, 32, 0));
+
+            var bounced = SessionParser.Parse("联系人丁\n[1条]\n相同摘要\n9:31", 0);
+            var duplicateResult = detector.Update(
+                new[] { bounced },
+                new DateTime(2026, 7, 1, 9, 33, 44));
+            Expect(
+                duplicateResult.Count == 0,
+                "Unread counter bounce bypassed the duplicate cooldown.",
+                failures);
+
+            detector.Update(new[] { read }, new DateTime(2026, 7, 1, 9, 36, 0));
+            var afterCooldown = detector.Update(
+                new[] { bounced },
+                new DateTime(2026, 7, 1, 9, 36, 1));
+            Expect(
+                afterCooldown.Count == 1,
+                "Notification remained suppressed after the cooldown expired.",
+                failures);
+        }
+
         private static void TestOutgoingFilter(ICollection<string> failures)
         {
             Expect(SessionParser.LooksLikeOutgoing("我: 好的"), "Outgoing Chinese colon was not detected.", failures);
             Expect(SessionParser.LooksLikeOutgoing("You: okay"), "Outgoing English prefix was not detected.", failures);
             Expect(!SessionParser.LooksLikeOutgoing("对方: 好的"), "Incoming message was classified as outgoing.", failures);
+        }
+
+        private static void TestPopupLifetime(ICollection<string> failures)
+        {
+            Expect(
+                PopupForm.AutoCloseMilliseconds == 120000,
+                "Popup lifetime is not configured for two minutes.",
+                failures);
+        }
+
+        private static void TestLogRotation(ICollection<string> failures)
+        {
+            var directory = Path.Combine(
+                Path.GetTempPath(),
+                "WeChatMessageNotifier-Test-" + Guid.NewGuid().ToString("N"));
+
+            try
+            {
+                var logger = new Logger(directory, 256);
+                for (var index = 0; index < 40; index++)
+                {
+                    logger.Info("Rotation test line " + index + " 0123456789");
+                }
+
+                Expect(File.Exists(Path.Combine(directory, "app.log")), "Active log was not created.", failures);
+                Expect(File.Exists(Path.Combine(directory, "app.log.1")), "Log rotation did not create the first archive.", failures);
+                Expect(File.Exists(Path.Combine(directory, "app.log.3")), "Log rotation did not retain three archives.", failures);
+                Expect(!File.Exists(Path.Combine(directory, "app.log.4")), "Log rotation retained too many archives.", failures);
+            }
+            finally
+            {
+                if (Directory.Exists(directory))
+                {
+                    Directory.Delete(directory, true);
+                }
+            }
         }
 
         private static void Expect(bool condition, string message, ICollection<string> failures)

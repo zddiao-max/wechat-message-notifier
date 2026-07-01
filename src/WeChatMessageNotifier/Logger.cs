@@ -11,16 +11,29 @@ namespace WeChatMessageNotifier
     {
         // Callers intentionally log only operational metadata. Contact names
         // and message bodies must never be passed to this class.
+        internal const int MaxFileBytes = 1024 * 1024;
+        internal const int RetainedFileCount = 3;
+
         private readonly object sync = new object();
         private readonly string path;
+        private readonly int maxFileBytes;
 
         internal Logger()
+            : this(
+                System.IO.Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                    "WeChatMessageNotifier"),
+                MaxFileBytes)
         {
-            var directory = System.IO.Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "WeChatMessageNotifier");
+        }
+
+        // The alternate directory and size are used by the self-test so log
+        // rotation can be verified without touching the user's real log.
+        internal Logger(string directory, int maxFileBytes)
+        {
             Directory.CreateDirectory(directory);
             path = System.IO.Path.Combine(directory, "app.log");
+            this.maxFileBytes = maxFileBytes;
         }
 
         internal string Path
@@ -42,11 +55,37 @@ namespace WeChatMessageNotifier
         {
             lock (sync)
             {
-                File.AppendAllText(
-                    path,
-                    DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff") + " [" + level + "] " + message + Environment.NewLine,
-                    Encoding.UTF8);
+                var line = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff") +
+                    " [" + level + "] " + message + Environment.NewLine;
+                RotateIfNeeded(Encoding.UTF8.GetByteCount(line));
+                File.AppendAllText(path, line, Encoding.UTF8);
             }
+        }
+
+        private void RotateIfNeeded(int incomingBytes)
+        {
+            if (!File.Exists(path) ||
+                new FileInfo(path).Length + incomingBytes <= maxFileBytes)
+            {
+                return;
+            }
+
+            var oldest = path + "." + RetainedFileCount;
+            if (File.Exists(oldest))
+            {
+                File.Delete(oldest);
+            }
+
+            for (var index = RetainedFileCount - 1; index >= 1; index--)
+            {
+                var source = path + "." + index;
+                if (File.Exists(source))
+                {
+                    File.Move(source, path + "." + (index + 1));
+                }
+            }
+
+            File.Move(path, path + ".1");
         }
     }
 }

@@ -9,21 +9,44 @@ namespace WeChatMessageNotifier
 {
     internal sealed class SessionChangeDetector
     {
+        internal static readonly TimeSpan DuplicateCooldown = TimeSpan.FromMinutes(5);
+
         private Dictionary<string, ChatSession> previous =
             new Dictionary<string, ChatSession>(StringComparer.Ordinal);
+        private readonly Dictionary<string, DateTime> recentlyNotified =
+            new Dictionary<string, DateTime>(StringComparer.Ordinal);
         private bool initialized;
 
         internal IList<ChatSession> Update(IList<ChatSession> current, DateTime now)
         {
             var notifications = new List<ChatSession>();
-            var next = new Dictionary<string, ChatSession>(StringComparer.Ordinal);
+            // Retain sessions that temporarily disappear from the virtualized
+            // list. Reappearance must not turn the same row into a "new"
+            // conversation just because one UI Automation scan was partial.
+            var next = new Dictionary<string, ChatSession>(previous, StringComparer.Ordinal);
+
+            // UI Automation can briefly return an empty list while WeChat is
+            // repainting. Keep the previous baseline so the same rows are not
+            // mistaken for newly visible messages on the next poll.
+            if (initialized && current.Count == 0)
+            {
+                return notifications;
+            }
+
+            foreach (var signature in recentlyNotified
+                .Where(delegate(KeyValuePair<string, DateTime> item)
+                {
+                    return now - item.Value >= DuplicateCooldown;
+                })
+                .Select(delegate(KeyValuePair<string, DateTime> item) { return item.Key; })
+                .ToArray())
+            {
+                recentlyNotified.Remove(signature);
+            }
 
             foreach (var session in current)
             {
-                if (!next.ContainsKey(session.Contact))
-                {
-                    next.Add(session.Contact, session);
-                }
+                next[session.Contact] = session;
 
                 // The first scan is a baseline. Without this guard every
                 // existing conversation would appear as a new notification.
@@ -34,16 +57,40 @@ namespace WeChatMessageNotifier
 
                 ChatSession old;
                 var known = previous.TryGetValue(session.Contact, out old);
-                var changed = known && !string.Equals(old.Signature, session.Signature, StringComparison.Ordinal);
+                var contentChanged =
+                    known &&
+                    !string.Equals(old.Signature, session.Signature, StringComparison.Ordinal);
+                var unreadCountAvailable =
+                    known &&
+                    old.UnreadCount >= 0 &&
+                    session.UnreadCount >= 0;
+                var unreadCountIncreased =
+                    unreadCountAvailable &&
+                    session.UnreadCount > old.UnreadCount;
+                // Prefer WeChat's explicit unread counter when available.
+                // Fall back to the existing content signature for rows that do
+                // not expose a counter (for example some muted conversations).
+                var changed = unreadCountAvailable
+                    ? unreadCountIncreased
+                    : contentChanged;
                 var newlyVisibleAndRecent =
                     !known &&
                     session.Position <= 2 &&
-                    SessionParser.IsRecentTimestamp(session.Timestamp, now);
+                    (session.UnreadCount > 0 ||
+                     SessionParser.IsRecentTimestamp(session.Timestamp, now));
 
                 if ((changed || newlyVisibleAndRecent) &&
                     !SessionParser.LooksLikeOutgoing(session.Preview))
                 {
-                    notifications.Add(session);
+                    DateTime lastNotification;
+                    var duplicate =
+                        recentlyNotified.TryGetValue(session.Signature, out lastNotification) &&
+                        now - lastNotification < DuplicateCooldown;
+                    if (!duplicate)
+                    {
+                        notifications.Add(session);
+                        recentlyNotified[session.Signature] = now;
+                    }
                 }
             }
 

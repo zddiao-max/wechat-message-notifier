@@ -12,21 +12,27 @@ namespace WeChatMessageNotifier
 {
     internal sealed class PopupManager
     {
-        // A lightweight timer re-evaluates popup placement. This is separate
-        // from message polling and never reads message content.
+        internal const int AnimationIntervalMilliseconds = 16;
+        private const int DetectionIntervalFrames = 15;
+
+        // One timer drives a 60 FPS spring animation. Expensive window
+        // obstruction detection still runs only about every 240 milliseconds.
         private readonly List<PopupForm> active = new List<PopupForm>();
         private readonly Action activateWeChat;
         private readonly Timer avoidanceTimer;
         private readonly int currentProcessId;
-        private int avoidanceOffset;
+        private double avoidanceOffset;
+        private double avoidanceVelocity;
+        private int targetAvoidanceOffset;
+        private int framesSinceDetection = DetectionIntervalFrames;
+        private Rectangle workingArea = Rectangle.Empty;
 
         internal PopupManager(Action activateWeChat)
         {
             this.activateWeChat = activateWeChat;
             currentProcessId = Process.GetCurrentProcess().Id;
-            avoidanceTimer = new Timer { Interval = 250 };
+            avoidanceTimer = new Timer { Interval = AnimationIntervalMilliseconds };
             avoidanceTimer.Tick += delegate { Reposition(); };
-            avoidanceTimer.Start();
         }
 
         internal void Show(string contact, string preview)
@@ -44,6 +50,11 @@ namespace WeChatMessageNotifier
                 existing.UpdateMessage(contact, preview);
                 active.Remove(existing);
                 active.Add(existing);
+                framesSinceDetection = DetectionIntervalFrames;
+                if (!avoidanceTimer.Enabled)
+                {
+                    avoidanceTimer.Start();
+                }
                 Reposition();
                 return;
             }
@@ -52,10 +63,24 @@ namespace WeChatMessageNotifier
             popup.FormClosed += delegate
             {
                 active.Remove(popup);
+                framesSinceDetection = DetectionIntervalFrames;
+                if (active.Count == 0)
+                {
+                    avoidanceTimer.Stop();
+                    avoidanceOffset = 0;
+                    avoidanceVelocity = 0;
+                    targetAvoidanceOffset = 0;
+                    workingArea = Rectangle.Empty;
+                }
                 Reposition();
             };
             active.Add(popup);
             popup.Show();
+            framesSinceDetection = DetectionIntervalFrames;
+            if (!avoidanceTimer.Enabled)
+            {
+                avoidanceTimer.Start();
+            }
             Reposition();
         }
 
@@ -72,25 +97,46 @@ namespace WeChatMessageNotifier
 
         private void Reposition()
         {
-            var foreground = NativeMethods.GetForegroundWindow();
-            var targetScreen = foreground != IntPtr.Zero
-                ? Screen.FromHandle(foreground)
-                : Screen.PrimaryScreen;
-            var area = targetScreen.WorkingArea;
-            var targetOffset = CalculateAvoidanceOffset(area);
-            if (avoidanceOffset < targetOffset)
+            if (active.Count == 0)
             {
-                avoidanceOffset = Math.Min(targetOffset, avoidanceOffset + 48);
-            }
-            else if (avoidanceOffset > targetOffset)
-            {
-                avoidanceOffset = Math.Max(targetOffset, avoidanceOffset - 32);
+                return;
             }
 
-            var bottom = area.Bottom - 12 - avoidanceOffset;
+            framesSinceDetection++;
+            if (workingArea == Rectangle.Empty ||
+                framesSinceDetection >= DetectionIntervalFrames)
+            {
+                var foreground = NativeMethods.GetForegroundWindow();
+                var targetScreen = foreground != IntPtr.Zero
+                    ? Screen.FromHandle(foreground)
+                    : Screen.PrimaryScreen;
+                workingArea = targetScreen.WorkingArea;
+                targetAvoidanceOffset = CalculateAvoidanceOffset(workingArea);
+                framesSinceDetection = 0;
+            }
+
+            // Damped spring motion gives fast initial movement, natural
+            // deceleration, and a very small settling response near the target.
+            var displacement = targetAvoidanceOffset - avoidanceOffset;
+            avoidanceVelocity = (avoidanceVelocity + displacement * 0.12) * 0.72;
+            avoidanceOffset += avoidanceVelocity;
+            if (Math.Abs(displacement) < 0.5 &&
+                Math.Abs(avoidanceVelocity) < 0.5)
+            {
+                avoidanceOffset = targetAvoidanceOffset;
+                avoidanceVelocity = 0;
+            }
+
+            avoidanceOffset = Math.Max(
+                0,
+                Math.Min(avoidanceOffset, workingArea.Height / 2.0));
+            var renderedOffset = (int)Math.Round(avoidanceOffset);
+            var bottom = workingArea.Bottom - 12 - renderedOffset;
             foreach (var popup in active.Where(delegate(PopupForm form) { return !form.IsDisposed; }).Reverse())
             {
-                popup.Location = new Point(area.Right - popup.Width - 12, bottom - popup.Height);
+                popup.Location = new Point(
+                    workingArea.Right - popup.Width - 12,
+                    bottom - popup.Height);
                 popup.EnsureTopMost();
                 bottom -= popup.Height + 10;
             }
