@@ -20,6 +20,7 @@ namespace WeChatMessageNotifier
         internal const int SwShowMaximized = 3;
         internal static readonly IntPtr HwndTopmost = new IntPtr(-1);
         internal const uint SwpNoSize = 0x0001;
+        internal const uint SwpNoMove = 0x0002;
         internal const uint SwpNoActivate = 0x0010;
         internal const uint SwpShowWindow = 0x0040;
         private const int GwlExStyle = -20;
@@ -29,6 +30,9 @@ namespace WeChatMessageNotifier
         private const int DwmwaCloaked = 14;
         private const int DwmwcpRound = 2;
         private const int DwmsbtTransientWindow = 3;
+        private const uint WmLeftButtonDown = 0x0201;
+        private const uint WmLeftButtonUp = 0x0202;
+        private static readonly IntPtr MkLeftButton = new IntPtr(0x0001);
 
         [DllImport("user32.dll")]
         internal static extern bool EnumWindows(EnumWindowsProc callback, IntPtr lParam);
@@ -57,6 +61,10 @@ namespace WeChatMessageNotifier
         [DllImport("user32.dll")]
         internal static extern bool SetForegroundWindow(IntPtr hWnd);
 
+        [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
+        internal static extern int SetCurrentProcessExplicitAppUserModelID(
+            string appId);
+
         [DllImport("user32.dll")]
         internal static extern bool SetWindowPos(
             IntPtr hWnd,
@@ -72,6 +80,18 @@ namespace WeChatMessageNotifier
 
         [DllImport("user32.dll")]
         private static extern bool GetWindowRect(IntPtr hWnd, out NativeRect rect);
+
+        [DllImport("user32.dll")]
+        private static extern bool ScreenToClient(
+            IntPtr hWnd,
+            ref NativePoint point);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool PostMessage(
+            IntPtr hWnd,
+            uint message,
+            IntPtr wParam,
+            IntPtr lParam);
 
         [DllImport("user32.dll", CharSet = CharSet.Unicode)]
         internal static extern int GetClassName(IntPtr hWnd, StringBuilder className, int maxCount);
@@ -123,6 +143,36 @@ namespace WeChatMessageNotifier
             var buffer = new StringBuilder(256);
             GetClassName(hWnd, buffer, buffer.Capacity);
             return buffer.ToString();
+        }
+
+        internal static bool PostLeftClick(
+            IntPtr hWnd,
+            Point screenPoint)
+        {
+            var clientPoint = new NativePoint
+            {
+                X = screenPoint.X,
+                Y = screenPoint.Y
+            };
+            if (!ScreenToClient(hWnd, ref clientPoint))
+            {
+                return false;
+            }
+
+            var packedPoint = new IntPtr(
+                (clientPoint.X & 0xFFFF) |
+                ((clientPoint.Y & 0xFFFF) << 16));
+            var downPosted = PostMessage(
+                hWnd,
+                WmLeftButtonDown,
+                MkLeftButton,
+                packedPoint);
+            var upPosted = PostMessage(
+                hWnd,
+                WmLeftButtonUp,
+                IntPtr.Zero,
+                packedPoint);
+            return downPosted && upPosted;
         }
 
         internal static bool TryGetExternalTopmostWindowAt(
@@ -224,6 +274,13 @@ namespace WeChatMessageNotifier
             internal int Top;
             internal int Right;
             internal int Bottom;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct NativePoint
+        {
+            internal int X;
+            internal int Y;
         }
     }
 }

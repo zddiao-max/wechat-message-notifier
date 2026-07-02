@@ -9,11 +9,33 @@ namespace WeChatMessageNotifier
 {
     internal static class Program
     {
+        internal const string ActivationEventName =
+            "Local\\WeChatMessageNotifier.ToastActivation";
+
         // The application uses a named mutex so only one tray monitor can run
         // for the current Windows session.
         [STAThread]
         private static int Main(string[] args)
         {
+            var toastActivation = HasToastActivationArgument(args);
+            if (toastActivation)
+            {
+                try
+                {
+                    using (var existingEvent = EventWaitHandle.OpenExisting(
+                        ActivationEventName))
+                    {
+                        existingEvent.Set();
+                        return 0;
+                    }
+                }
+                catch (WaitHandleCannotBeOpenedException)
+                {
+                    // No notifier is running yet. Continue startup and seed
+                    // the activation event so the new instance opens WeChat.
+                }
+            }
+
             if (args.Length > 0 && string.Equals(args[0], "--self-test", StringComparison.OrdinalIgnoreCase))
             {
                 return SelfTests.Run();
@@ -26,6 +48,10 @@ namespace WeChatMessageNotifier
 
             bool createdNew;
             using (var mutex = new Mutex(true, "Local\\WeChatMessageNotifier.Singleton", out createdNew))
+            using (var activationEvent = new EventWaitHandle(
+                toastActivation,
+                EventResetMode.AutoReset,
+                ActivationEventName))
             {
                 if (!createdNew)
                 {
@@ -39,9 +65,27 @@ namespace WeChatMessageNotifier
 
                 Application.EnableVisualStyles();
                 Application.SetCompatibleTextRenderingDefault(false);
-                Application.Run(new NotifierApplicationContext(args));
+                Application.Run(new NotifierApplicationContext(args, activationEvent));
                 return 0;
             }
+        }
+
+        private static bool HasToastActivationArgument(string[] args)
+        {
+            foreach (var value in args)
+            {
+                if (string.Equals(
+                        value,
+                        "--toast-activate",
+                        StringComparison.OrdinalIgnoreCase) ||
+                    value.StartsWith(
+                        "wechat-message-notifier://",
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+            }
+            return false;
         }
 
         private static int RunIntegrationTest()

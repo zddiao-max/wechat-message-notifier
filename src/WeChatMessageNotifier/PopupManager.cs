@@ -18,7 +18,7 @@ namespace WeChatMessageNotifier
         // One timer drives a 60 FPS spring animation. Expensive window
         // obstruction detection still runs only about every 240 milliseconds.
         private readonly List<PopupForm> active = new List<PopupForm>();
-        private readonly Action activateWeChat;
+        private readonly Action<string> activateWeChat;
         private readonly Timer avoidanceTimer;
         private readonly int currentProcessId;
         private double avoidanceOffset;
@@ -27,7 +27,7 @@ namespace WeChatMessageNotifier
         private int framesSinceDetection = DetectionIntervalFrames;
         private Rectangle workingArea = Rectangle.Empty;
 
-        internal PopupManager(Action activateWeChat)
+        internal PopupManager(Action<string> activateWeChat)
         {
             this.activateWeChat = activateWeChat;
             currentProcessId = Process.GetCurrentProcess().Id;
@@ -103,6 +103,7 @@ namespace WeChatMessageNotifier
             }
 
             framesSinceDetection++;
+            var refreshTopMost = false;
             if (workingArea == Rectangle.Empty ||
                 framesSinceDetection >= DetectionIntervalFrames)
             {
@@ -113,6 +114,7 @@ namespace WeChatMessageNotifier
                 workingArea = targetScreen.WorkingArea;
                 targetAvoidanceOffset = CalculateAvoidanceOffset(workingArea);
                 framesSinceDetection = 0;
+                refreshTopMost = true;
             }
 
             // Damped spring motion gives fast initial movement, natural
@@ -134,10 +136,20 @@ namespace WeChatMessageNotifier
             var bottom = workingArea.Bottom - 12 - renderedOffset;
             foreach (var popup in active.Where(delegate(PopupForm form) { return !form.IsDisposed; }).Reverse())
             {
-                popup.Location = new Point(
+                var targetLocation = new Point(
                     workingArea.Right - popup.Width - 12,
                     bottom - popup.Height);
-                popup.EnsureTopMost();
+                if (popup.Location != targetLocation)
+                {
+                    popup.Location = targetLocation;
+                }
+                // Reassert z-order only when obstruction state is sampled.
+                // Doing this for every popup on every animation frame makes
+                // multiple TOPMOST windows continuously reorder and flicker.
+                if (refreshTopMost)
+                {
+                    popup.EnsureTopMost();
+                }
                 bottom -= popup.Height + 10;
             }
         }

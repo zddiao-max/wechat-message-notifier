@@ -12,8 +12,9 @@ namespace WeChatMessageNotifier
 {
     internal sealed class WeChatMonitor
     {
-        // Monitoring is read-only: no input is injected into WeChat and no
-        // database, process memory, or private protocol is accessed.
+        // Monitoring is read-only: no database, process memory, or private
+        // protocol is accessed. A user-initiated popup click may post one
+        // local click to the matched visible chat row for navigation.
         private readonly Logger logger;
         private readonly SessionChangeDetector detector = new SessionChangeDetector();
         private IntPtr mainWindow;
@@ -111,6 +112,11 @@ namespace WeChatMessageNotifier
 
         internal void ActivateWeChat()
         {
+            ActivateWeChat(null);
+        }
+
+        internal void ActivateWeChat(string contact)
+        {
             if (!EnsureMainWindow())
             {
                 return;
@@ -131,6 +137,110 @@ namespace WeChatMessageNotifier
                         : NativeMethods.SwShow);
             }
             NativeMethods.SetForegroundWindow(mainWindow);
+
+            if (string.IsNullOrWhiteSpace(contact))
+            {
+                return;
+            }
+
+            try
+            {
+                var root = AutomationElement.FromHandle(mainWindow);
+                if (root == null)
+                {
+                    return;
+                }
+
+                foreach (var item in FindSessionItems(root))
+                {
+                    string name;
+                    string automationId;
+                    try
+                    {
+                        name = item.Current.Name;
+                        automationId = item.Current.AutomationId;
+                    }
+                    catch (ElementNotAvailableException)
+                    {
+                        continue;
+                    }
+
+                    var session = SessionParser.Parse(name, 0, automationId);
+                    if (session == null ||
+                        !string.Equals(
+                            session.Contact,
+                            contact,
+                            StringComparison.Ordinal))
+                    {
+                        continue;
+                    }
+
+                    object pattern;
+                    if (item.TryGetCurrentPattern(
+                        ScrollItemPattern.Pattern,
+                        out pattern))
+                    {
+                        ((ScrollItemPattern)pattern).ScrollIntoView();
+                    }
+
+                    // WeChat 4.x exposes both Invoke and SelectionItem on chat
+                    // rows. Invoke may return successfully without changing the
+                    // active conversation (notably for service accounts), while
+                    // SelectionItem is the semantic operation for a list row.
+                    if (item.TryGetCurrentPattern(
+                        SelectionItemPattern.Pattern,
+                        out pattern))
+                    {
+                        ((SelectionItemPattern)pattern).Select();
+                        logger.Info(
+                            "Target WeChat session activated with selection pattern.");
+                    }
+                    else if (item.TryGetCurrentPattern(
+                        InvokePattern.Pattern,
+                        out pattern))
+                    {
+                        ((InvokePattern)pattern).Invoke();
+                        logger.Info(
+                            "Target WeChat session activated with invoke pattern.");
+                    }
+                    else
+                    {
+                        item.SetFocus();
+                        logger.Info(
+                            "Target WeChat session activated with focus fallback.");
+                    }
+
+                    // On WeChat 4.x, SelectionItem.Select can report success
+                    // without refreshing the conversation pane. Post a click
+                    // directly to the visible row inside WeChat. This neither
+                    // moves the user's pointer nor sends global mouse input.
+                    var rectangle = item.Current.BoundingRectangle;
+                    if (!rectangle.IsEmpty)
+                    {
+                        var center = new System.Drawing.Point(
+                            (int)(rectangle.Left + rectangle.Width / 2),
+                            (int)(rectangle.Top + rectangle.Height / 2));
+                        if (NativeMethods.PostLeftClick(mainWindow, center))
+                        {
+                            logger.Info(
+                                "Target WeChat session row click posted.");
+                        }
+                        else
+                        {
+                            logger.Info(
+                                "Target WeChat session row click could not be posted.");
+                        }
+                    }
+
+                    return;
+                }
+
+                logger.Info("Target WeChat session was not available in the loaded list.");
+            }
+            catch (Exception exception)
+            {
+                logger.Error("Could not activate target WeChat session", exception);
+            }
         }
 
         private bool EnsureMainWindow()

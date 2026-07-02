@@ -6,6 +6,7 @@ using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.Windows.Forms;
+using EventWaitHandle = System.Threading.EventWaitHandle;
 
 namespace WeChatMessageNotifier
 {
@@ -16,22 +17,37 @@ namespace WeChatMessageNotifier
         private readonly Logger logger;
         private readonly WeChatMonitor monitor;
         private readonly PopupManager popupManager;
+        private readonly WindowsNotificationCenter notificationCenter;
         private readonly NotifyIcon trayIcon;
         private readonly Timer pollTimer;
+        private readonly Timer activationTimer;
+        private readonly EventWaitHandle activationEvent;
         private readonly ToolStripMenuItem pauseItem;
         private readonly ToolStripMenuItem privacyItem;
         private bool paused;
         private bool privacyMode;
-        private bool suppressWhenWeChatForeground = true;
+        private bool suppressWhenWeChatForeground;
 
-        internal NotifierApplicationContext(string[] args)
+        internal NotifierApplicationContext(
+            string[] args,
+            EventWaitHandle activationEvent)
         {
+            this.activationEvent = activationEvent;
             logger = new Logger();
             monitor = new WeChatMonitor(logger);
             popupManager = new PopupManager(monitor.ActivateWeChat);
+            notificationCenter = new WindowsNotificationCenter(
+                monitor.ActivateWeChat,
+                logger);
 
             privacyMode = HasArgument(args, "--privacy");
-            suppressWhenWeChatForeground = !HasArgument(args, "--notify-foreground");
+            // A notification click brings WeChat to the foreground. Suppressing
+            // every later message in that state can hide messages from other
+            // conversations, so foreground notifications are enabled by
+            // default. The opt-in switch preserves the quieter old behavior.
+            suppressWhenWeChatForeground =
+                HasArgument(args, "--suppress-foreground") &&
+                !HasArgument(args, "--notify-foreground");
 
             pauseItem = new ToolStripMenuItem("暂停监控");
             pauseItem.Click += delegate
@@ -49,7 +65,25 @@ namespace WeChatMessageNotifier
             privacyItem.CheckedChanged += delegate { privacyMode = privacyItem.Checked; };
 
             var testItem = new ToolStripMenuItem("发送测试通知");
-            testItem.Click += delegate { popupManager.Show("微信消息提醒器", "测试成功：消息弹窗工作正常。"); };
+            testItem.Click += delegate
+            {
+                var popupShown = true;
+                try
+                {
+                    popupManager.Show(
+                        "微信消息提醒器",
+                        "测试成功：消息弹窗与通知中心工作正常。");
+                }
+                catch (Exception exception)
+                {
+                    popupShown = false;
+                    logger.Error("Test popup failed", exception);
+                }
+                notificationCenter.Show(
+                    "微信消息提醒器",
+                    "测试成功：消息弹窗与通知中心工作正常。",
+                    popupShown);
+            };
 
             var logItem = new ToolStripMenuItem("打开日志");
             logItem.Click += delegate
@@ -89,6 +123,17 @@ namespace WeChatMessageNotifier
             pollTimer.Tick += Poll;
             pollTimer.Start();
 
+            activationTimer = new Timer { Interval = 200 };
+            activationTimer.Tick += delegate
+            {
+                if (this.activationEvent.WaitOne(0))
+                {
+                    logger.Info("Notification center entry activated.");
+                    monitor.ActivateWeChat();
+                }
+            };
+            activationTimer.Start();
+
             logger.Info("Application started. Message content is not written to the log.");
             popupManager.Show("微信消息提醒器", "已启动，本地监控微信新消息。");
         }
@@ -116,7 +161,22 @@ namespace WeChatMessageNotifier
             foreach (var session in changes)
             {
                 var body = privacyMode ? "收到一条新消息" : Limit(session.Preview, 180);
-                popupManager.Show(Limit(session.Contact, 80), body);
+                var title = Limit(session.Contact, 80);
+                var popupShown = true;
+                try
+                {
+                    // Keep the full contact name as the popup's navigation key.
+                    // The label already truncates visually when necessary.
+                    popupManager.Show(session.Contact, body);
+                }
+                catch (Exception exception)
+                {
+                    popupShown = false;
+                    logger.Error("Custom notification popup failed", exception);
+                }
+                // Normally this is a silent history entry. If the custom
+                // popup fails, Windows displays its own banner as a fallback.
+                notificationCenter.Show(title, body, popupShown);
                 logger.Info(
                     "Notification shown. ContactLength=" + session.Contact.Length +
                     " PreviewLength=" + session.Preview.Length);
@@ -126,10 +186,12 @@ namespace WeChatMessageNotifier
         private void Exit()
         {
             pollTimer.Stop();
+            activationTimer.Stop();
             popupManager.CloseAll();
             trayIcon.Visible = false;
             trayIcon.Dispose();
             pollTimer.Dispose();
+            activationTimer.Dispose();
             logger.Info("Application exited.");
             ExitThread();
         }

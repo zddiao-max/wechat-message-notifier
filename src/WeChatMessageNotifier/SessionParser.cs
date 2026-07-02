@@ -40,6 +40,8 @@ namespace WeChatMessageNotifier
             },
             StringComparer.Ordinal);
 
+        private const string ServiceAccountLabel = "\u670D\u52A1\u53F7";
+
         internal static ChatSession Parse(string rawName, int position, string automationId = null)
         {
             if (string.IsNullOrWhiteSpace(rawName))
@@ -100,10 +102,17 @@ namespace WeChatMessageNotifier
             // Everything between the contact and timestamp is treated as the
             // preview, except known presentation-only status labels.
             var previewEnd = timestampIndex >= 0 ? timestampIndex : lines.Count;
+            var isServiceAccountAggregate =
+                lines.Count > 1 &&
+                string.Equals(lines[1], ServiceAccountLabel, StringComparison.Ordinal);
             var previewParts = new List<string>();
             for (var index = 1; index < previewEnd; index++)
             {
-                if (!IsPresentationOnly(lines[index]))
+                if (!IsPresentationOnly(lines[index]) &&
+                    !string.Equals(
+                        lines[index],
+                        ServiceAccountLabel,
+                        StringComparison.Ordinal))
                 {
                     previewParts.Add(lines[index]);
                 }
@@ -112,8 +121,13 @@ namespace WeChatMessageNotifier
             // WeChat may expose unread counters and other presentation labels
             // before the preview. The last meaningful line is the actual
             // session summary and remains stable while those labels change.
+            // A service-account aggregate is different: it contains several
+            // message summaries ordered newest first, so its first meaningful
+            // line must be used or a new top entry can be missed.
             var preview = previewParts.Count > 0
-                ? previewParts[previewParts.Count - 1].Trim()
+                ? (isServiceAccountAggregate
+                    ? previewParts[0]
+                    : previewParts[previewParts.Count - 1]).Trim()
                 : string.Empty;
             if (preview.Length == 0)
             {

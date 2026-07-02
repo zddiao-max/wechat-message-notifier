@@ -161,7 +161,10 @@ namespace WeChatNotifier.Probe
                         "    Item[" + itemIndex + "] rect=" + FormatRect(itemRect) +
                         " nameLength=" + itemName.Length +
                         " nameLines=" + CountLines(itemName) +
-                        " children=" + children.Count);
+                        " children=" + children.Count +
+                        " invoke=" + Supports(item, InvokePattern.Pattern) +
+                        " select=" + Supports(item, SelectionItemPattern.Pattern) +
+                        " scroll=" + Supports(item, ScrollItemPattern.Pattern));
 
                     var lines = itemName.Replace("\r", string.Empty).Split('\n');
                     for (var lineIndex = 0; lineIndex < lines.Length; lineIndex++)
@@ -270,6 +273,21 @@ namespace WeChatNotifier.Probe
             catch
             {
                 return string.Empty;
+            }
+        }
+
+        private static bool Supports(
+            AutomationElement element,
+            AutomationPattern pattern)
+        {
+            object ignored;
+            try
+            {
+                return element.TryGetCurrentPattern(pattern, out ignored);
+            }
+            catch
+            {
+                return false;
             }
         }
     }

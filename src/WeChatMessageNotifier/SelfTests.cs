@@ -16,6 +16,7 @@ namespace WeChatMessageNotifier
             var failures = new List<string>();
             TestParser(failures);
             TestParserIgnoresPresentationNoise(failures);
+            TestServiceAccountAggregate(failures);
             TestChangeDetection(failures);
             TestDuplicateSuppression(failures);
             TestDuplicateCooldown(failures);
@@ -91,6 +92,42 @@ namespace WeChatMessageNotifier
 
             var third = detector.Update(new[] { changed }, new DateTime(2026, 6, 29, 12, 31, 10));
             Expect(third.Count == 0, "Duplicate session generated a notification.", failures);
+        }
+
+        private static void TestServiceAccountAggregate(
+            ICollection<string> failures)
+        {
+            const string contact =
+                "A2\u5C0F\u8FD4\u7701\u94B1\u52A9\u624B";
+            const string serviceAccount = "\u670D\u52A1\u53F7";
+            var detector = new SessionChangeDetector();
+            var baseline = SessionParser.Parse(
+                contact + "\n" + serviceAccount +
+                "\n\u65E7\u6D88\u606F\u7532" +
+                "\n\u66F4\u65E9\u7684\u6D88\u606F\n14:40",
+                0);
+
+            Expect(
+                baseline != null &&
+                baseline.Preview == "\u65E7\u6D88\u606F\u7532",
+                "Service-account parser did not use the newest summary.",
+                failures);
+            detector.Update(
+                new[] { baseline },
+                new DateTime(2026, 7, 1, 14, 40, 0));
+
+            var changed = SessionParser.Parse(
+                contact + "\n" + serviceAccount +
+                "\n\u65B0\u6D88\u606F\u4E59" +
+                "\n\u66F4\u65E9\u7684\u6D88\u606F\n14:41",
+                0);
+            var result = detector.Update(
+                new[] { changed },
+                new DateTime(2026, 7, 1, 14, 41, 0));
+            Expect(
+                result.Count == 1,
+                "A new service-account summary was not detected.",
+                failures);
         }
 
         private static void TestDuplicateSuppression(ICollection<string> failures)

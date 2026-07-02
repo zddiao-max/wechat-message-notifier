@@ -14,13 +14,16 @@ namespace WeChatMessageNotifier
         // an unread popup remain on the desktop indefinitely.
         internal const int AutoCloseMilliseconds = 2 * 60 * 1000;
 
-        private readonly Action activateWeChat;
+        private readonly Action<string> activateWeChat;
         private readonly Label titleLabel;
         private readonly Label bodyLabel;
         private readonly Label closeLabel;
         private readonly Timer autoCloseTimer;
 
-        internal PopupForm(string contact, string preview, Action activateWeChat)
+        internal PopupForm(
+            string contact,
+            string preview,
+            Action<string> activateWeChat)
         {
             this.activateWeChat = activateWeChat;
             ContactKey = contact;
@@ -139,9 +142,9 @@ namespace WeChatMessageNotifier
                 Top,
                 0,
                 0,
+                NativeMethods.SwpNoMove |
                 NativeMethods.SwpNoSize |
-                NativeMethods.SwpNoActivate |
-                NativeMethods.SwpShowWindow);
+                NativeMethods.SwpNoActivate);
         }
 
         protected override bool ShowWithoutActivation
@@ -202,7 +205,7 @@ namespace WeChatMessageNotifier
             autoCloseTimer.Stop();
             if (activateWeChat != null)
             {
-                activateWeChat();
+                activateWeChat(ContactKey);
             }
             Close();
         }

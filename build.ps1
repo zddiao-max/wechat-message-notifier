@@ -10,6 +10,12 @@ $compiler = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
 $uiaClient = Join-Path $env:WINDIR 'Microsoft.NET\assembly\GAC_MSIL\UIAutomationClient\v4.0_4.0.0.0__31bf3856ad364e35\UIAutomationClient.dll'
 $uiaTypes = Join-Path $env:WINDIR 'Microsoft.NET\assembly\GAC_MSIL\UIAutomationTypes\v4.0_4.0.0.0__31bf3856ad364e35\UIAutomationTypes.dll'
 $windowsBase = Join-Path $env:WINDIR 'Microsoft.NET\assembly\GAC_MSIL\WindowsBase\v4.0_4.0.0.0__31bf3856ad364e35\WindowsBase.dll'
+$windowsUi = Join-Path $env:WINDIR 'System32\WinMetadata\Windows.UI.winmd'
+$windowsData = Join-Path $env:WINDIR 'System32\WinMetadata\Windows.Data.winmd'
+$windowsFoundation = Join-Path $env:WINDIR 'System32\WinMetadata\Windows.Foundation.winmd'
+$windowsRuntime = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\System.Runtime.WindowsRuntime.dll'
+$systemRuntime = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\System.Runtime.dll'
+$windowsRuntimeInterop = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\System.Runtime.InteropServices.WindowsRuntime.dll'
 $sources = Get-ChildItem -LiteralPath $sourceDirectory -Filter '*.cs' | Select-Object -ExpandProperty FullName
 
 New-Item -ItemType Directory -Force -Path $outputDirectory | Out-Null
@@ -27,10 +33,23 @@ New-Item -ItemType Directory -Force -Path $outputDirectory | Out-Null
     /reference:$uiaClient `
     /reference:$uiaTypes `
     /reference:$windowsBase `
+    /reference:$windowsUi `
+    /reference:$windowsData `
+    /reference:$windowsFoundation `
+    /reference:$windowsRuntime `
+    /reference:$systemRuntime `
+    /reference:$windowsRuntimeInterop `
     $sources
 
 if ($LASTEXITCODE -ne 0) {
     throw "Compilation failed with exit code $LASTEXITCODE."
 }
+
+Copy-Item -LiteralPath (Join-Path $root 'LICENSE') `
+    -Destination (Join-Path $outputDirectory 'LICENSE') `
+    -Force
+Copy-Item -LiteralPath (Join-Path $root 'NOTICE.md') `
+    -Destination (Join-Path $outputDirectory 'NOTICE.md') `
+    -Force
 
 Write-Output $output
