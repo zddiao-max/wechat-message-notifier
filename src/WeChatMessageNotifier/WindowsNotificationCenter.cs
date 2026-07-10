@@ -6,6 +6,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Runtime.InteropServices.ComTypes;
+using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
 using System.Windows.Forms;
@@ -15,32 +16,56 @@ using Windows.UI.Notifications;
 
 namespace WeChatMessageNotifier
 {
-    internal sealed class WindowsNotificationCenter
+    internal sealed class WindowsNotificationCenter : IDisposable
     {
         private const string AppUserModelId = "OpenAICodex.WeChatMessageNotifier";
         private const string ShortcutName = "WeChat Message Notifier.lnk";
         private const string ProtocolName = "wechat-message-notifier";
         private const string ProtocolUri = ProtocolName + "://open";
 
-        private readonly Action activateWeChat;
+        private readonly Action<string> activateWeChat;
         private readonly Logger logger;
         private readonly SynchronizationContext uiContext;
-        private readonly List<ToastNotification> activeToasts =
-            new List<ToastNotification>();
+        private readonly bool emitNativeToast;
+        private readonly Dictionary<string, NotificationState> states =
+            new Dictionary<string, NotificationState>(StringComparer.Ordinal);
+        private readonly List<TrackedToast> activeToasts =
+            new List<TrackedToast>();
         private int nextTag;
         private bool available;
+        private bool disposed;
+        private string lastTagForTest;
+        private string lastGroupForTest;
+        private string lastTitleForTest;
+        private string lastMessageForTest;
+        private bool lastSuppressPopupForTest;
+        private int showCountForTest;
 
-        internal WindowsNotificationCenter(Action activateWeChat, Logger logger)
+        internal WindowsNotificationCenter(Action<string> activateWeChat, Logger logger)
+            : this(activateWeChat, logger, true, true)
+        {
+        }
+
+        internal WindowsNotificationCenter(
+            Action<string> activateWeChat,
+            Logger logger,
+            bool registerWithWindows,
+            bool emitNativeToast)
         {
             this.activateWeChat = activateWeChat;
             this.logger = logger;
+            this.emitNativeToast = emitNativeToast;
             uiContext = SynchronizationContext.Current;
 
             try
             {
-                NativeMethods.SetCurrentProcessExplicitAppUserModelID(AppUserModelId);
-                EnsureStartMenuShortcut();
-                EnsureProtocolRegistration();
+                if (registerWithWindows)
+                {
+                    NativeMethods.SetCurrentProcessExplicitAppUserModelID(
+                        AppUserModelId);
+                    EnsureStartMenuShortcut();
+                    EnsureProtocolRegistration();
+                }
                 available = true;
                 logger.Info("Windows notification center integration initialized.");
             }
@@ -53,19 +78,144 @@ namespace WeChatMessageNotifier
 
         internal bool Show(string title, string message, bool suppressPopup)
         {
-            if (!available)
+            nextTag++;
+            return ShowToast(
+                "general-" + nextTag.ToString("D6"),
+                title,
+                message,
+                suppressPopup,
+                null);
+        }
+
+        internal int ShowMessage(
+            string sessionKey,
+            string title,
+            string latestPreview,
+            bool privacyMode,
+            bool suppressPopup)
+        {
+            if (string.IsNullOrWhiteSpace(sessionKey))
+            {
+                sessionKey = title;
+            }
+
+            NotificationState state;
+            if (!states.TryGetValue(sessionKey, out state))
+            {
+                state = new NotificationState(BuildTag(sessionKey));
+                states.Add(sessionKey, state);
+            }
+            state.Update();
+
+            var displayedTitle = state.MessageCount > 1
+                ? title + "\uFF08" + state.MessageCount + "\u6761\u65B0\u6D88\u606F\uFF09"
+                : title;
+            var displayedMessage = FormatMessageBody(
+                latestPreview,
+                state.MessageCount,
+                privacyMode);
+            ShowToast(
+                state.Tag,
+                displayedTitle,
+                displayedMessage,
+                suppressPopup,
+                sessionKey);
+            return state.MessageCount;
+        }
+
+        internal int GetMessageCountForTest(string sessionKey)
+        {
+            NotificationState state;
+            return states.TryGetValue(sessionKey, out state)
+                ? state.MessageCount
+                : 0;
+        }
+
+        internal string GetTagForTest(string sessionKey)
+        {
+            NotificationState state;
+            return states.TryGetValue(sessionKey, out state)
+                ? state.Tag
+                : null;
+        }
+
+        internal int ActiveSessionCountForTest
+        {
+            get { return states.Count; }
+        }
+
+        internal string LastTagForTest
+        {
+            get { return lastTagForTest; }
+        }
+
+        internal string LastGroupForTest
+        {
+            get { return lastGroupForTest; }
+        }
+
+        internal string LastTitleForTest
+        {
+            get { return lastTitleForTest; }
+        }
+
+        internal string LastMessageForTest
+        {
+            get { return lastMessageForTest; }
+        }
+
+        internal bool LastSuppressPopupForTest
+        {
+            get { return lastSuppressPopupForTest; }
+        }
+
+        internal int ShowCountForTest
+        {
+            get { return showCountForTest; }
+        }
+
+        internal void SimulateActivationForTest(string sessionKey)
+        {
+            if (activateWeChat != null)
+            {
+                activateWeChat(sessionKey);
+            }
+        }
+
+        private bool ShowToast(
+            string tag,
+            string title,
+            string message,
+            bool suppressPopup,
+            string sessionKey)
+        {
+            if (!available || disposed)
             {
                 return false;
             }
 
             try
             {
+                lastTagForTest = tag;
+                lastGroupForTest = "wechat";
+                lastTitleForTest = title;
+                lastMessageForTest = message;
+                lastSuppressPopupForTest = suppressPopup;
+                showCountForTest++;
+
+                if (!emitNativeToast)
+                {
+                    return true;
+                }
+
                 var xml = ToastNotificationManager.GetTemplateContent(
                     ToastTemplateType.ToastText02);
                 var textNodes = xml.GetElementsByTagName("text");
                 textNodes[0].AppendChild(xml.CreateTextNode(title));
                 textNodes[1].AppendChild(xml.CreateTextNode(message));
-                xml.DocumentElement.SetAttribute("launch", ProtocolUri);
+                xml.DocumentElement.SetAttribute(
+                    "launch",
+                    BuildProtocolUri(sessionKey));
                 xml.DocumentElement.SetAttribute("activationType", "protocol");
 
                 var history = ToastNotificationManager.History.GetHistory(
@@ -73,7 +223,7 @@ namespace WeChatMessageNotifier
                 if (history.Count == 0)
                 {
                     nextTag = 0;
-                    activeToasts.Clear();
+                    ClearTrackedToasts();
                 }
                 nextTag++;
 
@@ -81,43 +231,53 @@ namespace WeChatMessageNotifier
                 {
                     SuppressPopup = suppressPopup,
                     Group = "wechat",
-                    Tag = "message-" + nextTag.ToString("D6")
+                    Tag = tag
                 };
-                toast.Activated +=
+                Windows.Foundation.TypedEventHandler<ToastNotification, object>
+                    activatedHandler = null;
+                Windows.Foundation.TypedEventHandler<
+                    ToastNotification,
+                    ToastDismissedEventArgs> dismissedHandler = null;
+                Windows.Foundation.TypedEventHandler<
+                    ToastNotification,
+                    ToastFailedEventArgs> failedHandler = null;
+
+                activatedHandler =
                     new Windows.Foundation.TypedEventHandler<ToastNotification, object>(
                     delegate
                     {
-                        if (uiContext != null)
-                        {
-                            uiContext.Post(delegate
-                            {
-                                if (activateWeChat != null)
-                                {
-                                    activateWeChat();
-                                }
-                            }, null);
-                        }
-                        else if (activateWeChat != null)
-                        {
-                            activateWeChat();
-                        }
+                        Activate(sessionKey);
                         Release(toast);
                     });
-                toast.Dismissed +=
+                dismissedHandler =
                     new Windows.Foundation.TypedEventHandler<
                         ToastNotification,
                         ToastDismissedEventArgs>(
                     delegate { Release(toast); });
-                toast.Failed +=
+                failedHandler =
                     new Windows.Foundation.TypedEventHandler<
                         ToastNotification,
                         ToastFailedEventArgs>(
-                    delegate { Release(toast); });
+                    delegate
+                    {
+                        logger.Info(
+                            "Windows toast failed. Notification may be blocked by Windows notification settings, focus assist, or system policy.");
+                        Release(toast);
+                    });
 
-                activeToasts.Add(toast);
+                toast.Activated += activatedHandler;
+                toast.Dismissed += dismissedHandler;
+                toast.Failed += failedHandler;
+
+                activeToasts.Add(
+                    new TrackedToast(
+                        toast,
+                        activatedHandler,
+                        dismissedHandler,
+                        failedHandler));
                 if (activeToasts.Count > 100)
                 {
-                    activeToasts.RemoveAt(0);
+                    ReleaseTracked(activeToasts[0]);
                 }
                 ToastNotificationManager
                     .CreateToastNotifier(AppUserModelId)
@@ -125,6 +285,8 @@ namespace WeChatMessageNotifier
                 logger.Info(
                     "Notification center entry added. PopupSuppressed=" +
                     suppressPopup +
+                    " Tag=" + tag +
+                    " Group=wechat" +
                     " TitleLength=" + title.Length +
                     " MessageLength=" + message.Length);
                 return true;
@@ -136,16 +298,119 @@ namespace WeChatMessageNotifier
             }
         }
 
+        private void Activate(string sessionKey)
+        {
+            if (uiContext != null)
+            {
+                uiContext.Post(delegate
+                {
+                    if (activateWeChat != null)
+                    {
+                        activateWeChat(sessionKey);
+                    }
+                }, null);
+            }
+            else if (activateWeChat != null)
+            {
+                activateWeChat(sessionKey);
+            }
+        }
+
+        private static string FormatMessageBody(
+            string latestPreview,
+            int messageCount,
+            bool privacyMode)
+        {
+            if (privacyMode)
+            {
+                return messageCount > 1
+                    ? "\u6536\u5230 " + messageCount + " \u6761\u65B0\u6D88\u606F"
+                    : "\u6536\u5230\u4E00\u6761\u65B0\u6D88\u606F";
+            }
+
+            return messageCount > 1
+                ? "\u6536\u5230 " + messageCount + " \u6761\u65B0\u6D88\u606F\uFF1A" + latestPreview
+                : latestPreview;
+        }
+
+        private static string BuildProtocolUri(string sessionKey)
+        {
+            if (string.IsNullOrWhiteSpace(sessionKey))
+            {
+                return ProtocolUri;
+            }
+
+            return ProtocolUri +
+                "?session=" +
+                Uri.EscapeDataString(sessionKey);
+        }
+
+        private static string BuildTag(string sessionKey)
+        {
+            using (var sha256 = SHA256.Create())
+            {
+                var bytes = sha256.ComputeHash(
+                    Encoding.UTF8.GetBytes(sessionKey ?? string.Empty));
+                var builder = new StringBuilder("session-", 24);
+                for (var index = 0; index < 8; index++)
+                {
+                    builder.Append(bytes[index].ToString("x2"));
+                }
+                return builder.ToString();
+            }
+        }
+
+        public void Dispose()
+        {
+            disposed = true;
+            if (uiContext != null &&
+                !object.ReferenceEquals(SynchronizationContext.Current, uiContext))
+            {
+                uiContext.Post(delegate { ClearTrackedToasts(); }, null);
+            }
+            else
+            {
+                ClearTrackedToasts();
+            }
+        }
+
         private void Release(ToastNotification toast)
         {
             if (uiContext != null)
             {
-                uiContext.Post(delegate { activeToasts.Remove(toast); }, null);
+                uiContext.Post(delegate { ReleaseOnCurrentThread(toast); }, null);
             }
             else
             {
-                activeToasts.Remove(toast);
+                ReleaseOnCurrentThread(toast);
             }
+        }
+
+        private void ReleaseOnCurrentThread(ToastNotification toast)
+        {
+            for (var index = 0; index < activeToasts.Count; index++)
+            {
+                if (object.ReferenceEquals(activeToasts[index].Toast, toast))
+                {
+                    ReleaseTracked(activeToasts[index]);
+                    return;
+                }
+            }
+        }
+
+        private void ReleaseTracked(TrackedToast tracked)
+        {
+            tracked.Detach();
+            activeToasts.Remove(tracked);
+        }
+
+        private void ClearTrackedToasts()
+        {
+            foreach (var tracked in activeToasts.ToArray())
+            {
+                tracked.Detach();
+            }
+            activeToasts.Clear();
         }
 
         private static void EnsureStartMenuShortcut()
@@ -292,5 +557,82 @@ namespace WeChatMessageNotifier
 
         [DllImport("ole32.dll")]
         private static extern int PropVariantClear(ref PropVariant value);
+
+        private sealed class TrackedToast
+        {
+            private readonly Windows.Foundation.TypedEventHandler<
+                ToastNotification,
+                object> activatedHandler;
+            private readonly Windows.Foundation.TypedEventHandler<
+                ToastNotification,
+                ToastDismissedEventArgs> dismissedHandler;
+            private readonly Windows.Foundation.TypedEventHandler<
+                ToastNotification,
+                ToastFailedEventArgs> failedHandler;
+            private bool detached;
+
+            internal TrackedToast(
+                ToastNotification toast,
+                Windows.Foundation.TypedEventHandler<
+                    ToastNotification,
+                    object> activatedHandler,
+                Windows.Foundation.TypedEventHandler<
+                    ToastNotification,
+                    ToastDismissedEventArgs> dismissedHandler,
+                Windows.Foundation.TypedEventHandler<
+                    ToastNotification,
+                    ToastFailedEventArgs> failedHandler)
+            {
+                Toast = toast;
+                this.activatedHandler = activatedHandler;
+                this.dismissedHandler = dismissedHandler;
+                this.failedHandler = failedHandler;
+            }
+
+            internal ToastNotification Toast { get; private set; }
+
+            internal void Detach()
+            {
+                if (detached || Toast == null)
+                {
+                    return;
+                }
+
+                try
+                {
+                    Toast.Activated -= activatedHandler;
+                    Toast.Dismissed -= dismissedHandler;
+                    Toast.Failed -= failedHandler;
+                }
+                catch (Exception)
+                {
+                    // A WinRT toast may already be torn down by the system.
+                    // Detach is a best-effort cleanup path and must not crash
+                    // the tray application during notification dismissal.
+                }
+                finally
+                {
+                    detached = true;
+                    Toast = null;
+                }
+            }
+        }
+
+        private sealed class NotificationState
+        {
+            internal NotificationState(string tag)
+            {
+                Tag = tag;
+            }
+
+            internal string Tag { get; private set; }
+
+            internal int MessageCount { get; private set; }
+
+            internal void Update()
+            {
+                MessageCount++;
+            }
+        }
     }
 }

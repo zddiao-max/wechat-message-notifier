@@ -3,7 +3,9 @@
 
 using System;
 using System.Collections.Generic;
+using System.Drawing;
 using System.IO;
+using System.Windows.Forms;
 
 namespace WeChatMessageNotifier
 {
@@ -17,11 +19,25 @@ namespace WeChatMessageNotifier
             TestParser(failures);
             TestParserIgnoresPresentationNoise(failures);
             TestServiceAccountAggregate(failures);
+            TestSessionClassification(failures);
             TestChangeDetection(failures);
             TestDuplicateSuppression(failures);
+            TestDetectorRetentionBounds(failures);
             TestDuplicateCooldown(failures);
             TestOutgoingFilter(failures);
+            TestOutgoingNotificationFiltering(failures);
+            TestSelectedConversationProtection(failures);
             TestPopupLifetime(failures);
+            TestPopupAggregation(failures);
+            TestMotionAnimation(failures);
+            TestPopupManagerAnimationFlow(failures);
+            TestPopupHostShrink(failures);
+            TestAvoidanceMotion(failures);
+            TestDpiScaling(failures);
+            TestPopupVisualModes(failures);
+            TestWindowsToastDisplayMode(failures);
+            TestNotificationFilterSettings(failures);
+            TestSettingsStore(failures);
             TestLogRotation(failures);
 
             if (failures.Count == 0)
@@ -65,8 +81,12 @@ namespace WeChatMessageNotifier
             if (session != null)
             {
                 Expect(
-                    session.Contact == "稳定联系人",
-                    "Stable session AutomationId was not reused.",
+                    session.Contact == "联系人乙",
+                    "Display contact was replaced by the stable identity.",
+                    failures);
+                Expect(
+                    session.SessionKey == "稳定联系人",
+                    "Stable session AutomationId was not reused as the key.",
                     failures);
                 Expect(
                     session.Preview == "真正的消息摘要",
@@ -92,6 +112,76 @@ namespace WeChatMessageNotifier
 
             var third = detector.Update(new[] { changed }, new DateTime(2026, 6, 29, 12, 31, 10));
             Expect(third.Count == 0, "Duplicate session generated a notification.", failures);
+        }
+
+        private static void TestSessionClassification(
+            ICollection<string> failures)
+        {
+            var direct = SessionParser.Parse(
+                "普通联系人\n消息\n10:00",
+                0,
+                "session_item_wxid_direct");
+            Expect(
+                direct.Kind == ChatSessionKind.Unknown,
+                "Session without an explicit type marker defaulted to DirectContact.",
+                failures);
+
+            var service = SessionParser.Parse(
+                "帐号名称\n服务号\n消息\n10:00",
+                0,
+                "session_item_gh_service");
+            Expect(
+                service.Kind == ChatSessionKind.ServiceAccount &&
+                service.HasServiceLabel,
+                "Service account label was not classified.",
+                failures);
+
+            var official = SessionParser.Parse(
+                "帐号名称\n消息\n公众号\n10:00",
+                0,
+                "session_item_gh_official");
+            Expect(
+                official.Kind == ChatSessionKind.OfficialAccount &&
+                official.HasOfficialLabel,
+                "Official account label was not classified.",
+                failures);
+
+            var group = SessionParser.Parse(
+                "项目讨论\n消息\n10:00",
+                0,
+                "session_item_team@chatroom");
+            Expect(
+                group.Kind == ChatSessionKind.GroupChat,
+                "Chatroom identity was not classified as a group.",
+                failures);
+
+            var mutedGroup = SessionParser.Parse(
+                "项目讨论\n消息\n10:00\n消息免打扰",
+                0,
+                "session_item_team@chatroom");
+            Expect(
+                mutedGroup.Kind == ChatSessionKind.MutedGroupChat &&
+                mutedGroup.IsMuted,
+                "Muted chatroom was not classified.",
+                failures);
+
+            var mutedDirect = SessionParser.Parse(
+                "普通联系人\n消息\n10:00\n消息免打扰",
+                0,
+                "session_item_wxid_muted");
+            Expect(
+                mutedDirect.Kind == ChatSessionKind.Unknown &&
+                mutedDirect.IsMuted,
+                "Muted direct contact was misclassified as a muted group.",
+                failures);
+
+            var unknown = SessionParser.Parse(
+                "无法确认\n消息\n10:00",
+                0);
+            Expect(
+                unknown.Kind == ChatSessionKind.Unknown,
+                "Session without stable classification evidence was not Unknown.",
+                failures);
         }
 
         private static void TestServiceAccountAggregate(
@@ -203,6 +293,85 @@ namespace WeChatMessageNotifier
                 failures);
         }
 
+        private static void TestDetectorRetentionBounds(
+            ICollection<string> failures)
+        {
+            var now = new DateTime(2026, 7, 9, 10, 0, 0);
+            var detector = new SessionChangeDetector();
+            var contactA = SessionParser.Parse(
+                "Contact A\nold A\n10:00",
+                0,
+                "session_item_retention_a");
+            var contactB = SessionParser.Parse(
+                "Contact B\nold B\n10:00",
+                1,
+                "session_item_retention_b");
+
+            detector.Update(new[] { contactA, contactB }, now);
+            detector.Update(
+                new[] { contactA },
+                now.AddMinutes(5));
+            Expect(
+                detector.RetainedSessionCount == 2,
+                "Recently missing session was not retained.",
+                failures);
+
+            detector.Update(
+                new[] { contactA },
+                now.Add(SessionChangeDetector.MissingSessionRetention)
+                    .AddMinutes(1));
+            Expect(
+                detector.RetainedSessionCount == 1,
+                "Expired missing session baseline was not pruned.",
+                failures);
+
+            var capped = new SessionChangeDetector();
+            var many = new List<ChatSession>();
+            for (var index = 0;
+                 index < SessionChangeDetector.MaximumRetainedSessions + 25;
+                 index++)
+            {
+                many.Add(SessionParser.Parse(
+                    "Contact " + index + "\nold\n10:00",
+                    index,
+                    "session_item_memory_" + index));
+            }
+            capped.Update(many, now);
+
+            var stillVisible = new[]
+            {
+                many[many.Count - 2],
+                many[many.Count - 1]
+            };
+            capped.Update(stillVisible, now.AddMinutes(1));
+            Expect(
+                capped.RetainedSessionCount <=
+                SessionChangeDetector.MaximumRetainedSessions,
+                "Detector retained more missing baselines than the cap.",
+                failures);
+
+            var changedVisible = SessionParser.Parse(
+                "Contact " + (many.Count - 1) + "\nnew\n10:02",
+                0,
+                "session_item_memory_" + (many.Count - 1));
+            var visibleResult = capped.Update(
+                new[] { stillVisible[0], changedVisible },
+                now.AddMinutes(2));
+            Expect(
+                visibleResult.Count == 1,
+                "Retention trimming removed a currently visible baseline.",
+                failures);
+
+            capped.Update(
+                new ChatSession[0],
+                now.Add(SessionChangeDetector.MissingSessionRetention)
+                    .AddMinutes(3));
+            Expect(
+                capped.RetainedSessionCount == 0,
+                "Empty scans did not prune expired retained sessions.",
+                failures);
+        }
+
         private static void TestDuplicateCooldown(ICollection<string> failures)
         {
             var detector = new SessionChangeDetector();
@@ -240,16 +409,1665 @@ namespace WeChatMessageNotifier
         private static void TestOutgoingFilter(ICollection<string> failures)
         {
             Expect(SessionParser.LooksLikeOutgoing("我: 好的"), "Outgoing Chinese colon was not detected.", failures);
+            Expect(SessionParser.LooksLikeOutgoing("我：[图片]"), "Outgoing Chinese attachment was not detected.", failures);
             Expect(SessionParser.LooksLikeOutgoing("You: okay"), "Outgoing English prefix was not detected.", failures);
+            Expect(!SessionParser.LooksLikeOutgoing("你: 好的"), "Unverified 你 prefix was treated as outgoing.", failures);
+            Expect(SessionParser.LooksLikeOutgoing("我 [文件]"), "Outgoing file summary was not detected.", failures);
+            Expect(SessionParser.LooksLikeOutgoing("我 [语音]"), "Outgoing voice summary was not detected.", failures);
+            Expect(SessionParser.LooksLikeOutgoing("我 [视频]"), "Outgoing video summary was not detected.", failures);
+            Expect(
+                SessionParser.LooksLikeOutgoing("我 发起了语音通话"),
+                "Outgoing call summary was not detected.",
+                failures);
             Expect(!SessionParser.LooksLikeOutgoing("对方: 好的"), "Incoming message was classified as outgoing.", failures);
+            Expect(!SessionParser.LooksLikeOutgoing("你好吗"), "A normal message starting with 你 was misclassified.", failures);
+            Expect(!SessionParser.LooksLikeOutgoing("你明天来吗"), "Incoming text starting with 你 was misclassified.", failures);
+            Expect(!SessionParser.LooksLikeOutgoing("我爱学习"), "A normal message starting with 我 was misclassified.", failures);
+        }
+
+        private static void TestSelectedConversationProtection(
+            ICollection<string> failures)
+        {
+            var now = new DateTime(2026, 7, 2, 10, 0, 0);
+            var selectedDetector = new SessionChangeDetector();
+            var selectedBaseline = SessionParser.Parse(
+                "当前联系人\n旧摘要\n10:00",
+                0);
+            selectedBaseline.IsSelected = true;
+            selectedDetector.Update(
+                new[] { selectedBaseline },
+                now,
+                true);
+
+            var selectedChanged = SessionParser.Parse(
+                "当前联系人\n微信真实格式未知的本地摘要变化\n10:01",
+                0);
+            selectedChanged.IsSelected = true;
+            var selectedResult = selectedDetector.Update(
+                new[] { selectedChanged },
+                now.AddMinutes(1),
+                true);
+            Expect(
+                selectedResult.Count == 0,
+                "Foreground selected preview-only change generated a notification.",
+                failures);
+
+            var otherDetector = new SessionChangeDetector();
+            var otherBaseline = SessionParser.Parse(
+                "其他联系人\n旧摘要\n10:00",
+                1);
+            otherBaseline.IsSelected = false;
+            otherDetector.Update(new[] { otherBaseline }, now, true);
+            var otherChanged = SessionParser.Parse(
+                "其他联系人\n对方发来的消息\n10:01",
+                1);
+            otherChanged.IsSelected = false;
+            var otherResult = otherDetector.Update(
+                new[] { otherChanged },
+                now.AddMinutes(1),
+                true);
+            Expect(
+                otherResult.Count == 1,
+                "Foreground non-selected incoming change was suppressed.",
+                failures);
+
+            var unreadDetector = new SessionChangeDetector();
+            var unreadBaseline = SessionParser.Parse(
+                "群聊\n[0条]\n旧摘要\n10:00",
+                1);
+            unreadBaseline.IsSelected = false;
+            unreadDetector.Update(new[] { unreadBaseline }, now, true);
+            var unreadChanged = SessionParser.Parse(
+                "群聊\n[1条]\n新消息\n10:01",
+                1);
+            unreadChanged.IsSelected = false;
+            var unreadResult = unreadDetector.Update(
+                new[] { unreadChanged },
+                now.AddMinutes(1),
+                true);
+            Expect(
+                unreadResult.Count == 1,
+                "Foreground non-selected unread increase was suppressed.",
+                failures);
+
+            var selectedUnreadDetector = new SessionChangeDetector();
+            var selectedUnreadBaseline = SessionParser.Parse(
+                "当前联系人\n[0条]\n旧摘要\n10:00",
+                0);
+            selectedUnreadBaseline.IsSelected = true;
+            selectedUnreadDetector.Update(
+                new[] { selectedUnreadBaseline },
+                now,
+                true);
+            var selectedUnreadChanged = SessionParser.Parse(
+                "当前联系人\n[1条]\n对方新消息\n10:01",
+                0);
+            selectedUnreadChanged.IsSelected = true;
+            var selectedUnreadResult = selectedUnreadDetector.Update(
+                new[] { selectedUnreadChanged },
+                now.AddMinutes(1),
+                true);
+            Expect(
+                selectedUnreadResult.Count == 1,
+                "Selected conversation unread increase was incorrectly suppressed.",
+                failures);
+        }
+
+        private static void TestOutgoingNotificationFiltering(
+            ICollection<string> failures)
+        {
+            var detector = new SessionChangeDetector();
+            var now = new DateTime(2026, 7, 2, 9, 0, 0);
+            detector.Update(
+                new[] { SessionParser.Parse("联系人甲\n旧消息\n9:00", 0) },
+                now);
+
+            var outgoingText = detector.Update(
+                new[] { SessionParser.Parse("联系人甲\n我: 好的\n9:01", 0) },
+                now.AddMinutes(1));
+            Expect(
+                outgoingText.Count == 0,
+                "Outgoing text generated a notification.",
+                failures);
+
+            var outgoingImage = detector.Update(
+                new[] { SessionParser.Parse("联系人甲\n我：[图片]\n9:02", 0) },
+                now.AddMinutes(2));
+            Expect(
+                outgoingImage.Count == 0,
+                "Outgoing image generated a notification.",
+                failures);
+
+            var outgoingEnglish = detector.Update(
+                new[] { SessionParser.Parse("联系人甲\nYou: ok\n9:03", 0) },
+                now.AddMinutes(3));
+            Expect(
+                outgoingEnglish.Count == 0,
+                "Outgoing English text generated a notification.",
+                failures);
+
+            var incoming = detector.Update(
+                new[] { SessionParser.Parse("联系人甲\n对方的新消息\n9:04", 0) },
+                now.AddMinutes(4));
+            Expect(
+                incoming.Count == 1,
+                "Incoming message without an unread counter was suppressed.",
+                failures);
+
+            var unreadDetector = new SessionChangeDetector();
+            unreadDetector.Update(
+                new[] { SessionParser.Parse("联系人乙\n[0条]\n旧消息\n9:00", 0) },
+                now);
+            var unreadIncreased = unreadDetector.Update(
+                new[] { SessionParser.Parse("联系人乙\n[1条]\n对方的新消息\n9:01", 0) },
+                now.AddMinutes(1));
+            Expect(
+                unreadIncreased.Count == 1,
+                "Unread count increase did not generate a notification.",
+                failures);
+
+            var unchangedUnreadDetector = new SessionChangeDetector();
+            unchangedUnreadDetector.Update(
+                new[] { SessionParser.Parse("联系人丙\n[0条]\n旧消息\n9:00", 0) },
+                now);
+            var unchangedUnreadOutgoing = unchangedUnreadDetector.Update(
+                new[] { SessionParser.Parse("联系人丙\n[0条]\n我: 好的\n9:01", 0) },
+                now.AddMinutes(1));
+            Expect(
+                unchangedUnreadOutgoing.Count == 0,
+                "Outgoing preview with unchanged unread count generated a notification.",
+                failures);
+            var unchangedUnreadIncoming = unchangedUnreadDetector.Update(
+                new[] { SessionParser.Parse("联系人丙\n[0条]\n对方的新消息\n9:02", 0) },
+                now.AddMinutes(2));
+            Expect(
+                unchangedUnreadIncoming.Count == 0,
+                "Preview change bypassed an unchanged unread counter.",
+                failures);
         }
 
         private static void TestPopupLifetime(ICollection<string> failures)
         {
             Expect(
-                PopupForm.AutoCloseMilliseconds == 120000,
+                PopupCardControl.AutoCloseMilliseconds == 120000,
                 "Popup lifetime is not configured for two minutes.",
                 failures);
+        }
+
+        private static void TestPopupAggregation(
+            ICollection<string> failures)
+        {
+            var manager = new PopupManager(null, false);
+            try
+            {
+                var first = manager.Show(
+                    "session-a",
+                    "\u5F20\u4E09",
+                    "\u7B2C\u4E00\u6761",
+                    false);
+                var second = manager.Show(
+                    "session-a",
+                    "\u5F20\u4E09",
+                    "\u7B2C\u4E8C\u6761",
+                    false);
+                Expect(
+                    object.ReferenceEquals(first, second),
+                    "Same session created a second active popup entry.",
+                    failures);
+                Expect(
+                    manager.ActiveCount == 1 && second.MessageCount == 2,
+                    "Second message was not merged into one entry with count 2.",
+                    failures);
+
+                var third = manager.Show(
+                    "session-a",
+                    "\u5F20\u4E09",
+                    "\u7B2C\u4E09\u6761",
+                    false);
+                Expect(
+                    manager.ActiveCount == 1 &&
+                    third.MessageCount == 3 &&
+                    third.LatestPreview == "\u7B2C\u4E09\u6761" &&
+                    third.SessionKey == "session-a",
+                    "Third message did not update the existing entry.",
+                    failures);
+                Expect(
+                    third.TitleText.IndexOf(
+                        "3\u6761\u65B0\u6D88\u606F",
+                        StringComparison.Ordinal) >= 0,
+                    "Message count was not rendered in the title.",
+                    failures);
+
+                manager.Show(
+                    "session-b",
+                    "\u674E\u56DB",
+                    "\u53E6\u4E00\u4E2A\u8054\u7CFB\u4EBA",
+                    false);
+                Expect(
+                    manager.ActiveCount == 2,
+                    "Different contacts did not retain separate entries.",
+                    failures);
+                Expect(
+                    manager.IsObstructionTimerRunning,
+                    "Obstruction timer did not start for active entries.",
+                    failures);
+
+                manager.Close("session-a");
+                Expect(
+                    manager.ActiveCount == 1 &&
+                    manager.GetEntry("session-b") != null,
+                    "Closing one contact affected another contact.",
+                    failures);
+                manager.Close("session-b");
+                Expect(
+                    manager.ActiveCount == 0 &&
+                    !manager.IsAnimationTimerRunning &&
+                    !manager.IsObstructionTimerRunning,
+                    "Popup timers remained active after the last card closed.",
+                    failures);
+
+                var privateEntry = manager.Show(
+                    "session-private",
+                    "\u738B\u4E94",
+                    "\u79D8\u5BC6\u6B63\u6587\u4E00",
+                    true);
+                privateEntry = manager.Show(
+                    "session-private",
+                    "\u738B\u4E94",
+                    "\u79D8\u5BC6\u6B63\u6587\u4E8C",
+                    true);
+                Expect(
+                    privateEntry.BodyText ==
+                    "\u6536\u5230 2 \u6761\u65B0\u6D88\u606F",
+                    "Privacy mode did not show the aggregated message count.",
+                    failures);
+                Expect(
+                    privateEntry.BodyText.IndexOf(
+                        "\u79D8\u5BC6",
+                        StringComparison.Ordinal) < 0,
+                    "Privacy mode exposed the latest message preview.",
+                    failures);
+                manager.Close("session-private");
+            }
+            finally
+            {
+                manager.CloseAll();
+            }
+        }
+
+        private static void TestMotionAnimation(
+            ICollection<string> failures)
+        {
+            var standard = new PopupAnimationState(
+                0,
+                MotionMode.Standard);
+            Expect(
+                standard.Phase == PopupAnimationPhase.Entering &&
+                standard.NeedsAnimation &&
+                standard.Opacity.Current < standard.Opacity.Target &&
+                standard.XOffset.Current != standard.XOffset.Target &&
+                standard.YOffset.Current != standard.YOffset.Target &&
+                standard.Scale.Current < standard.Scale.Target &&
+                PopupManager.ShouldRunAnimation(
+                    new[] { standard },
+                    new AvoidanceMotionState()),
+                "Standard motion did not start the enter animation.",
+                failures);
+            var initialEnterY = standard.YOffset.Current;
+            standard.Advance(MotionMode.Standard);
+            Expect(
+                standard.YOffset.Current < initialEnterY &&
+                standard.YOffset.Current > standard.YOffset.Target,
+                "Enter animation did not progressively approach its target.",
+                failures);
+            AdvanceUntilSettled(standard, MotionMode.Standard);
+            Expect(
+                standard.Phase == PopupAnimationPhase.Stable &&
+                !standard.NeedsAnimation &&
+                Math.Abs(standard.Opacity.Current - 1) < 0.001 &&
+                Math.Abs(standard.Scale.Current - 1) < 0.001,
+                "Enter animation did not finish in the stable state.",
+                failures);
+
+            standard.ShiftLayoutCurrent(128);
+            standard.SetLayoutTarget(0, MotionMode.Standard);
+            Expect(
+                standard.Phase == PopupAnimationPhase.Moving &&
+                standard.LayoutY.Current == 128 &&
+                standard.LayoutY.Target == 0 &&
+                PopupManager.ShouldRunAnimation(
+                    new[] { standard },
+                    new AvoidanceMotionState()),
+                "Card reflow did not enter the moving state or start animation.",
+                failures);
+            standard.Advance(MotionMode.Standard);
+            Expect(
+                standard.LayoutY.Current > 0 &&
+                standard.LayoutY.Current < 128,
+                "Card reflow jumped to its final target in one frame.",
+                failures);
+            AdvanceUntilSettled(standard, MotionMode.Standard);
+            Expect(
+                standard.Phase == PopupAnimationPhase.Stable &&
+                standard.LayoutY.Current == 0,
+                "Card reflow did not settle at its target.",
+                failures);
+
+            var enteringSecondCard = new PopupAnimationState(
+                128,
+                MotionMode.Standard);
+            Expect(
+                enteringSecondCard.Phase ==
+                PopupAnimationPhase.Entering &&
+                enteringSecondCard.Opacity.Current == 0 &&
+                enteringSecondCard.LayoutY.Target == 128,
+                "Second card did not retain its independent enter animation.",
+                failures);
+            Expect(
+                !PopupManager.ShouldRunAnimation(
+                    new[] { standard },
+                    new AvoidanceMotionState()),
+                "Animation clock would remain active after motion settled.",
+                failures);
+
+            standard.BeginUpdate(MotionMode.Standard);
+            Expect(
+                standard.Phase == PopupAnimationPhase.Updating &&
+                standard.Scale.Target ==
+                MotionSettings.UpdatePulseScale,
+                "Standard content update did not start a scale pulse.",
+                failures);
+            Expect(
+                PopupManager.ShouldRunAnimation(
+                    new[] { standard },
+                    new AvoidanceMotionState()),
+                "Animation clock would not start for an update pulse.",
+                failures);
+            AdvanceUntilSettled(standard, MotionMode.Standard);
+            Expect(
+                standard.Phase == PopupAnimationPhase.Stable &&
+                Math.Abs(standard.Scale.Current - 1) < 0.001,
+                "Content update pulse did not return to stable scale.",
+                failures);
+
+            standard.BeginExit(MotionMode.Standard);
+            AdvanceUntilSettled(standard, MotionMode.Standard);
+            Expect(
+                standard.Phase == PopupAnimationPhase.Exited &&
+                !standard.NeedsAnimation,
+                "Exit animation did not reach the removable state.",
+                failures);
+
+            var reduced = new PopupAnimationState(
+                0,
+                MotionMode.Reduced);
+            Expect(
+                reduced.Phase == PopupAnimationPhase.Entering &&
+                reduced.NeedsAnimation &&
+                reduced.YOffset.Current != reduced.YOffset.Target,
+                "Reduced motion skipped the card enter animation.",
+                failures);
+            AdvanceUntilSettled(reduced, MotionMode.Reduced);
+            reduced.BeginUpdate(MotionMode.Reduced);
+            Expect(
+                reduced.Scale.Target == 1 &&
+                reduced.Scale.Current == 1,
+                "Reduced motion unexpectedly enabled the scale pulse.",
+                failures);
+            AdvanceUntilSettled(reduced, MotionMode.Reduced);
+
+            var disabled = new PopupAnimationState(
+                0,
+                MotionMode.Off);
+            Expect(
+                disabled.Phase == PopupAnimationPhase.Stable &&
+                !disabled.NeedsAnimation,
+                "Disabled motion started an animation.",
+                failures);
+            disabled.BeginExit(MotionMode.Off);
+            Expect(
+                disabled.Phase == PopupAnimationPhase.Exited &&
+                !disabled.NeedsAnimation,
+                "Disabled motion did not remove the card immediately.",
+                failures);
+
+            var firstTarget = PopupManager.CalculateTargetY(
+                246,
+                2,
+                0);
+            var secondTarget = PopupManager.CalculateTargetY(
+                246,
+                2,
+                1);
+            var remainingTarget = PopupManager.CalculateTargetY(
+                246,
+                1,
+                0);
+            Expect(
+                firstTarget == 0 &&
+                secondTarget == 128 &&
+                remainingTarget == 128 &&
+                PopupHostForm.CalculateRequiredHeight(2) == 246,
+                "Card reflow targets were not bottom-aligned correctly.",
+                failures);
+
+            var offManager = new PopupManager(
+                null,
+                false,
+                MotionMode.Off);
+            try
+            {
+                offManager.Show(
+                    "motion-off",
+                    "contact",
+                    "message",
+                    false);
+                Expect(
+                    !offManager.IsAnimationTimerRunning,
+                    "MotionMode.Off started the animation timer.",
+                    failures);
+                offManager.Close("motion-off");
+                Expect(
+                    offManager.ActiveCount == 0 &&
+                    !offManager.IsAnimationTimerRunning &&
+                    !offManager.IsObstructionTimerRunning,
+                    "Animation timers remained active without cards.",
+                    failures);
+            }
+            finally
+            {
+                offManager.CloseAll();
+            }
+        }
+
+        private static void AdvanceUntilSettled(
+            PopupAnimationState state,
+            MotionMode mode)
+        {
+            for (var frame = 0;
+                 frame < 600 && state.NeedsAnimation;
+                 frame++)
+            {
+                state.Advance(mode);
+            }
+        }
+
+        private static void TestPopupManagerAnimationFlow(
+            ICollection<string> failures)
+        {
+            var manager = new PopupManager(
+                null,
+                false,
+                MotionMode.Standard);
+            try
+            {
+                var firstEntry = manager.Show(
+                    "flow-first",
+                    "contact-one",
+                    "message-one",
+                    false);
+                Expect(
+                    manager.IsAnimationTimerRunning &&
+                    manager.GetAnimationPhaseForTest("flow-first") ==
+                    PopupAnimationPhase.Entering &&
+                    manager.GetOpacityForTest("flow-first") == 0 &&
+                    manager.GetVisualYForTest("flow-first") !=
+                    manager.GetTargetYForTest("flow-first"),
+                    "PopupManager did not start the first card enter flow.",
+                    failures);
+
+                var previousOpacity =
+                    manager.GetOpacityForTest("flow-first");
+                for (var frame = 0; frame < 4; frame++)
+                {
+                    manager.AdvanceAnimationFrameForTest();
+                    var currentOpacity =
+                        manager.GetOpacityForTest("flow-first");
+                    Expect(
+                        currentOpacity > previousOpacity,
+                        "Enter opacity was not monotonic.",
+                        failures);
+                    previousOpacity = currentOpacity;
+                }
+                Expect(
+                    manager.GetOpacityForTest("flow-first") < 0.75 &&
+                    manager.GetVisualYForTest("flow-first") >
+                    manager.GetTargetYForTest("flow-first") + 8 &&
+                    manager.IsAnimationTimerRunning,
+                    "First card enter animation was effectively complete within four frames.",
+                    failures);
+
+                var remainingEnterFrames =
+                    AdvanceManagerUntilAnimationsStop(manager);
+                Expect(
+                    manager.GetAnimationPhaseForTest("flow-first") ==
+                    PopupAnimationPhase.Stable &&
+                    !manager.IsAnimationTimerRunning &&
+                    remainingEnterFrames + 4 >= 12,
+                    "First card did not settle and stop the animation clock.",
+                    failures);
+
+                var secondEntry = manager.Show(
+                    "flow-second",
+                    "contact-two",
+                    "message-two",
+                    false);
+                var firstCurrent =
+                    manager.GetCurrentYForTest("flow-first");
+                Expect(
+                    manager.GetAnimationPhaseForTest("flow-first") ==
+                    PopupAnimationPhase.Moving &&
+                    firstCurrent !=
+                    manager.GetTargetYForTest("flow-first") &&
+                    manager.GetAnimationPhaseForTest("flow-second") ==
+                    PopupAnimationPhase.Entering &&
+                    manager.GetOpacityForTest("flow-second") == 0 &&
+                    manager.IsAnimationTimerRunning,
+                    "Second session did not start reflow and enter animations.",
+                    failures);
+
+                manager.AdvanceAnimationFrameForTest();
+                var firstAfterOneFrame =
+                    manager.GetCurrentYForTest("flow-first");
+                var firstFrameDistance =
+                    Math.Abs(firstCurrent - firstAfterOneFrame);
+                Expect(
+                    firstFrameDistance > 0 &&
+                    firstFrameDistance <=
+                    MotionSettings.StandardCardMoveMaximumStep &&
+                    firstAfterOneFrame !=
+                    manager.GetTargetYForTest("flow-first"),
+                    "Card reflow exceeded its frame limit or jumped to target.",
+                    failures);
+
+                for (var frame = 1; frame < 4; frame++)
+                {
+                    manager.AdvanceAnimationFrameForTest();
+                }
+                Expect(
+                    manager.GetOpacityForTest("flow-second") < 0.75 &&
+                    manager.IsAnimationTimerRunning,
+                    "Second card became fully visible too early.",
+                    failures);
+                var remainingReflowFrames =
+                    AdvanceManagerUntilAnimationsStop(manager);
+                Expect(
+                    remainingReflowFrames + 4 >= 12,
+                    "Card reflow completed too quickly to be perceptible.",
+                    failures);
+
+                var unaffectedCurrentY =
+                    manager.GetCurrentYForTest("flow-first");
+                var unaffectedTargetY =
+                    manager.GetTargetYForTest("flow-first");
+                var updatedEntry = manager.Show(
+                    "flow-second",
+                    "contact-two",
+                    "message-three",
+                    false);
+                Expect(
+                    object.ReferenceEquals(secondEntry, updatedEntry) &&
+                    updatedEntry.MessageCount == 2 &&
+                    updatedEntry.LatestPreview == "message-three" &&
+                    updatedEntry.SessionKey == "flow-second" &&
+                    manager.GetAnimationPhaseForTest("flow-second") ==
+                    PopupAnimationPhase.Updating &&
+                    manager.GetOpacityForTest("flow-second") ==
+                    MotionSettings.StandardUpdateOpacity &&
+                    manager.IsAnimationTimerRunning &&
+                    manager.ActiveCount == 2 &&
+                    firstEntry.SessionKey == "flow-first" &&
+                    manager.GetCurrentYForTest("flow-first") ==
+                    unaffectedCurrentY &&
+                    manager.GetTargetYForTest("flow-first") ==
+                    unaffectedTargetY,
+                    "Same-session update recreated a card or skipped feedback.",
+                    failures);
+                manager.AdvanceAnimationFrameForTest();
+                Expect(
+                    manager.GetScaleForTest("flow-second") > 1 &&
+                    manager.GetScaleForTest("flow-second") <=
+                    MotionSettings.UpdatePulseScale,
+                    "Update pulse was missing or exceeded its limit.",
+                    failures);
+                AdvanceManagerUntilAnimationsStop(manager);
+                Expect(
+                    manager.GetAnimationPhaseForTest("flow-second") ==
+                    PopupAnimationPhase.Stable &&
+                    !manager.IsAnimationTimerRunning,
+                    "Update animation did not return to stable.",
+                    failures);
+
+                manager.Close("flow-first");
+                manager.Close("flow-second");
+                Expect(
+                    manager.ActiveCount == 0 &&
+                    !manager.IsAnimationTimerRunning,
+                    "Headless UI flow left animation running without cards.",
+                    failures);
+            }
+            finally
+            {
+                manager.CloseAll();
+            }
+
+            var reduced = new PopupManager(
+                null,
+                false,
+                MotionMode.Reduced);
+            try
+            {
+                reduced.Show(
+                    "flow-reduced",
+                    "contact",
+                    "message",
+                    false);
+                Expect(
+                    reduced.GetAnimationPhaseForTest("flow-reduced") ==
+                    PopupAnimationPhase.Entering &&
+                    reduced.IsAnimationTimerRunning,
+                    "Reduced mode skipped PopupManager enter animation.",
+                    failures);
+                reduced.Close("flow-reduced");
+            }
+            finally
+            {
+                reduced.CloseAll();
+            }
+        }
+
+        private static int AdvanceManagerUntilAnimationsStop(
+            PopupManager manager)
+        {
+            var frame = 0;
+            for (;
+                 frame < 600 && manager.IsAnimationTimerRunning;
+                 frame++)
+            {
+                manager.AdvanceAnimationFrameForTest();
+            }
+            return frame;
+        }
+
+        private static void TestPopupHostShrink(
+            ICollection<string> failures)
+        {
+            var metrics = DpiUtil.DefaultMetrics;
+            using (var host = new PopupHostForm(
+                1.0f,
+                PopupVisualMode.Glass))
+            {
+                host.SetBounds(
+                    100,
+                    100,
+                    metrics.CardWidth,
+                    metrics.CardHeight,
+                    BoundsSpecified.All);
+                host.GrowToFit(3);
+                var threeHeight = PopupHostForm.CalculateRequiredHeight(3);
+                var twoHeight = PopupHostForm.CalculateRequiredHeight(2);
+                var oneHeight = PopupHostForm.CalculateRequiredHeight(1);
+                var bottomBeforeShrink = host.Bottom;
+                Expect(
+                    host.Height == threeHeight,
+                    "GrowToFit did not produce a three-card host height.",
+                    failures);
+                var shrinkDelta = host.ShrinkToFit(2);
+                Expect(
+                    shrinkDelta == threeHeight - twoHeight &&
+                    host.Height == twoHeight &&
+                    host.Bottom == bottomBeforeShrink &&
+                    host.Region != null,
+                    "ShrinkToFit did not reduce to two cards while keeping the bottom anchored.",
+                    failures);
+                var bottomBeforeSecondShrink = host.Bottom;
+                shrinkDelta = host.ShrinkToFit(1);
+                Expect(
+                    shrinkDelta == twoHeight - oneHeight &&
+                    host.Height == oneHeight &&
+                    host.Bottom == bottomBeforeSecondShrink &&
+                    host.Region != null,
+                    "ShrinkToFit did not reduce to one card while keeping the bottom anchored.",
+                    failures);
+            }
+
+            var manager = new PopupManager(
+                null,
+                false,
+                MotionMode.Off);
+            try
+            {
+                manager.Show("shrink-a", "A", "one", false);
+                manager.Show("shrink-b", "B", "two", false);
+                manager.Show("shrink-c", "C", "three", false);
+                Expect(
+                    manager.HostHeightForTest ==
+                    PopupHostForm.CalculateRequiredHeight(3),
+                    "Headless host height was not tracking three active cards.",
+                    failures);
+                manager.Close("shrink-b");
+                Expect(
+                    manager.HostHeightForTest ==
+                    PopupHostForm.CalculateRequiredHeight(2) &&
+                    manager.GetTargetYForTest("shrink-a") == 0 &&
+                    manager.GetTargetYForTest("shrink-c") ==
+                    metrics.CardHeight + metrics.CardSpacing,
+                    "Closing the middle card did not compact remaining card targets.",
+                    failures);
+                manager.Close("shrink-a");
+                Expect(
+                    manager.HostHeightForTest ==
+                    PopupHostForm.CalculateRequiredHeight(1) &&
+                    manager.GetTargetYForTest("shrink-c") == 0,
+                    "Closing the top card did not compact to one card.",
+                    failures);
+                manager.Close("shrink-c");
+                Expect(
+                    manager.ActiveCount == 0 &&
+                    manager.HostHeightForTest == metrics.CardHeight &&
+                    !manager.IsObstructionTimerRunning,
+                    "Closing the last card did not reset host/timers.",
+                    failures);
+            }
+            finally
+            {
+                manager.CloseAll();
+            }
+
+            var standard = new PopupManager(
+                null,
+                false,
+                MotionMode.Standard);
+            try
+            {
+                standard.Show("std-a", "A", "one", false);
+                standard.Show("std-b", "B", "two", false);
+                standard.Show("std-c", "C", "three", false);
+                AdvanceManagerUntilAnimationsStop(standard);
+                standard.Close("std-a");
+                AdvanceManagerUntilAnimationsStop(standard);
+                Expect(
+                    standard.HostHeightForTest ==
+                    PopupHostForm.CalculateRequiredHeight(2) &&
+                    standard.GetTargetYForTest("std-b") == 0,
+                    "Standard-mode exit did not shrink host after animation completed.",
+                    failures);
+            }
+            finally
+            {
+                standard.CloseAll();
+            }
+        }
+
+        private static void TestAvoidanceMotion(
+            ICollection<string> failures)
+        {
+            var standard = new AvoidanceMotionState();
+            Expect(
+                standard.ReportDetection(200, MotionMode.Standard) &&
+                standard.Target == 200 &&
+                standard.Current == 0,
+                "Obstruction detection did not update only the target offset.",
+                failures);
+
+            standard.Advance(MotionMode.Standard);
+            Expect(
+                standard.Current > 0 &&
+                standard.Current < 200 &&
+                standard.Current <=
+                MotionSettings.StandardAvoidanceMaximumStep,
+                "Standard avoidance jumped directly to its target.",
+                failures);
+
+            var currentBeforeTargetChange = standard.Current;
+            var velocityBeforeTargetChange = standard.Velocity;
+            Expect(
+                standard.ReportDetection(240, MotionMode.Standard) &&
+                standard.Current == currentBeforeTargetChange &&
+                standard.Velocity == velocityBeforeTargetChange,
+                "Changing the avoidance target reset current position or velocity.",
+                failures);
+            var distanceBeforeAdvance =
+                Math.Abs(standard.Target - standard.Current);
+            for (var frame = 0; frame < 8; frame++)
+            {
+                standard.Advance(MotionMode.Standard);
+            }
+            Expect(
+                Math.Abs(standard.Target - standard.Current) <
+                distanceBeforeAdvance,
+                "Standard avoidance did not progressively approach its target.",
+                failures);
+            AdvanceAvoidanceUntilSettled(
+                standard,
+                MotionMode.Standard);
+            Expect(
+                standard.IsSettled &&
+                Math.Abs(standard.Current - 240) < 0.001,
+                "Standard avoidance did not settle at its target.",
+                failures);
+
+            var boundedStandard = new AvoidanceMotionState();
+            boundedStandard.ReportDetection(200, MotionMode.Standard);
+            var peakOffset = 0.0;
+            for (var frame = 0;
+                 frame < 600 && !boundedStandard.IsSettled;
+                 frame++)
+            {
+                boundedStandard.Advance(MotionMode.Standard);
+                peakOffset = Math.Max(
+                    peakOffset,
+                    boundedStandard.Current);
+            }
+            Expect(
+                peakOffset <= 202.5,
+                "Standard avoidance spring produced excessive overshoot.",
+                failures);
+
+            Expect(
+                !standard.ReportDetection(0, MotionMode.Standard) &&
+                !standard.ReportDetection(0, MotionMode.Standard) &&
+                standard.Target == 240,
+                "One or two clear samples caused an early tray-panel return.",
+                failures);
+            Expect(
+                standard.ReportDetection(0, MotionMode.Standard) &&
+                standard.Target == 0 &&
+                standard.Current == 240,
+                "Repeated clear samples did not release the avoidance target.",
+                failures);
+            standard.Advance(MotionMode.Standard);
+            Expect(
+                standard.Current > 0 &&
+                standard.Current < 240,
+                "Avoidance return jumped directly to the bottom.",
+                failures);
+            AdvanceAvoidanceUntilSettled(
+                standard,
+                MotionMode.Standard);
+            Expect(
+                standard.IsSettled &&
+                standard.Current == 0 &&
+                !PopupManager.ShouldRunAnimation(
+                    null,
+                    standard),
+                "Avoidance animation would keep its timer after settling.",
+                failures);
+
+            var reduced = new AvoidanceMotionState();
+            reduced.ReportDetection(200, MotionMode.Reduced);
+            reduced.Advance(MotionMode.Reduced);
+            Expect(
+                reduced.Current > 0 &&
+                reduced.Current < 200 &&
+                reduced.Current <=
+                MotionSettings.ReducedAvoidanceMaximumStep,
+                "Reduced motion did not retain smooth bounded movement.",
+                failures);
+            AdvanceAvoidanceUntilSettled(
+                reduced,
+                MotionMode.Reduced);
+
+            var disabled = new AvoidanceMotionState();
+            disabled.ReportDetection(200, MotionMode.Off);
+            Expect(
+                disabled.Current == 200 &&
+                disabled.Target == 200 &&
+                disabled.IsSettled,
+                "MotionMode.Off did not position avoidance immediately.",
+                failures);
+        }
+
+        private static void TestDpiScaling(ICollection<string> failures)
+        {
+            Expect(
+                Math.Abs(DpiUtil.ScaleFromDpi(96) - 1.0f) < 0.001f,
+                "96 DPI did not map to a 1.0 scale.",
+                failures);
+            Expect(
+                Math.Abs(DpiUtil.ScaleFromDpi(120) - 1.25f) < 0.001f,
+                "125 percent DPI did not map to a 1.25 scale.",
+                failures);
+            Expect(
+                Math.Abs(DpiUtil.ScaleFromDpi(144) - 1.5f) < 0.001f,
+                "150 percent DPI did not map to a 1.5 scale.",
+                failures);
+            Expect(
+                Math.Abs(DpiUtil.ScaleFromDpi(192) - 2.0f) < 0.001f,
+                "200 percent DPI did not map to a 2.0 scale.",
+                failures);
+
+            var normal = DpiMetrics.FromScale(1.0f);
+            var scaled = DpiMetrics.FromScale(1.5f);
+            Expect(
+                normal.CardWidth == PopupCardControl.CardWidth &&
+                normal.CardHeight == PopupCardControl.CardHeight &&
+                normal.CardSpacing == PopupHostForm.CardSpacing,
+                "100 percent DPI metrics changed baseline dimensions.",
+                failures);
+            Expect(
+                scaled.CardWidth == 570 &&
+                scaled.CardHeight == 177 &&
+                scaled.CardSpacing == 15 &&
+                scaled.TitleBounds.X == 36 &&
+                scaled.TitleFontPixels > normal.TitleFontPixels,
+                "Card dimensions, padding, or font pixels did not scale with DPI.",
+                failures);
+
+            var hostHeight = PopupHostForm.CalculateRequiredHeight(
+                2,
+                scaled);
+            Expect(
+                PopupManager.CalculateTargetY(
+                    hostHeight,
+                    2,
+                    1,
+                    scaled) ==
+                scaled.CardHeight + scaled.CardSpacing,
+                "Scaled card layout target was incorrect.",
+                failures);
+
+            var entry = new PopupEntry(
+                "dpi-card",
+                "联系人",
+                "消息正文",
+                false);
+            var card = new PopupCardControl(entry, 1.5f);
+            try
+            {
+                Expect(
+                    card.Width == scaled.CardWidth &&
+                    card.Height == scaled.CardHeight &&
+                    Math.Abs(card.DpiScale - 1.5f) < 0.01f,
+                    "Popup card did not apply initial DPI metrics.",
+                    failures);
+                var fontBefore = card.TitleFontPixels;
+                card.UpdateDpiScale(2.0f);
+                var doubleScale = DpiMetrics.FromScale(2.0f);
+                Expect(
+                    card.Width == doubleScale.CardWidth &&
+                    card.Height == doubleScale.CardHeight &&
+                    card.TitleFontPixels > fontBefore,
+                    "Popup card did not rebuild layout and fonts after a DPI change.",
+                    failures);
+                Expect(
+                    card.UsesDirectTextRendering,
+                    "Popup card text was not configured for direct ClearType rendering.",
+                    failures);
+                Expect(
+                    card.FontUnit == GraphicsUnit.Point &&
+                    Math.Abs(card.TitleFontPoints - 11.5f) < 0.001f &&
+                    Math.Abs(card.BodyFontPoints - 10.0f) < 0.001f,
+                    "Popup card fonts did not use clean point-size rendering.",
+                    failures);
+
+                card.ApplyVisual(1, MotionSettings.UpdatePulseScale);
+                Expect(
+                    card.Width == doubleScale.CardWidth &&
+                    card.Height == doubleScale.CardHeight &&
+                    card.VisualScale <= 1.02,
+                    "Animation scale changed text-bearing control bounds.",
+                    failures);
+            }
+            finally
+            {
+                card.Dispose();
+            }
+
+            var offManager = new PopupManager(
+                delegate { },
+                false,
+                MotionMode.Off);
+            try
+            {
+                offManager.Show("dpi-off", "联系人", "消息", false);
+                Expect(
+                    offManager.GetCurrentYForTest("dpi-off") ==
+                    offManager.GetTargetYForTest("dpi-off"),
+                    "MotionMode.Off did not keep DPI layout snapped to integer coordinates.",
+                    failures);
+            }
+            finally
+            {
+                offManager.CloseAll();
+            }
+        }
+
+        private static void AdvanceAvoidanceUntilSettled(
+            AvoidanceMotionState state,
+            MotionMode mode)
+        {
+            for (var frame = 0;
+                 frame < 600 && !state.IsSettled;
+                 frame++)
+            {
+                state.Advance(mode);
+            }
+        }
+
+        private static void TestPopupVisualModes(
+            ICollection<string> failures)
+        {
+            var defaultManager = new PopupManager(
+                delegate { },
+                false,
+                MotionMode.Standard);
+            try
+            {
+                Expect(
+                    defaultManager.VisualMode == PopupVisualMode.Glass,
+                    "Default popup visual mode was not Glass.",
+                    failures);
+            }
+            finally
+            {
+                defaultManager.CloseAll();
+            }
+
+            var manager = new PopupManager(
+                delegate { },
+                false,
+                MotionMode.Standard,
+                PopupVisualMode.Auto);
+            try
+            {
+                Expect(
+                    manager.VisualMode == PopupVisualMode.Auto,
+                    "PopupManager did not keep the default visual mode.",
+                    failures);
+                manager.SetVisualMode(PopupVisualMode.Glass);
+                Expect(
+                    manager.VisualMode == PopupVisualMode.Glass,
+                    "PopupManager visual mode did not switch to Glass.",
+                    failures);
+                manager.SetVisualMode(PopupVisualMode.Solid);
+                Expect(
+                    manager.VisualMode == PopupVisualMode.Solid,
+                    "PopupManager visual mode did not switch to Solid.",
+                    failures);
+            }
+            finally
+            {
+                manager.CloseAll();
+            }
+
+            Expect(
+                !NativeMethods.TryApplyWindows11Backdrop(
+                    IntPtr.Zero,
+                    PopupBackdropKind.Acrylic),
+                "DWM backdrop helper did not fail safely for a zero handle.",
+                failures);
+            Expect(
+                !NativeMethods.TryApplyWindows11Backdrop(
+                    IntPtr.Zero,
+                    PopupBackdropKind.None),
+                "DWM backdrop helper applied a disabled backdrop kind.",
+                failures);
+            Expect(
+                !NativeMethods.TryApplyAccentAcrylicBackdrop(
+                    IntPtr.Zero,
+                    Color.FromArgb(140, 244, 247, 250)),
+                "Accent acrylic helper did not fail safely for a zero handle.",
+                failures);
+
+            using (var glassHost = new PopupHostForm(
+                1.0f,
+                PopupVisualMode.Glass))
+            {
+                glassHost.CreateControl();
+                glassHost.UpdateVisualMode(PopupVisualMode.Glass);
+                Expect(
+                    !glassHost.ExtendFrameApplied &&
+                    !glassHost.AccentBackdropApplied,
+                    "Glass mode enabled a whole-window composition path that can contaminate GDI text.",
+                    failures);
+                Expect(
+                    glassHost.VisualDiagnostics.IndexOf(
+                        "TextPath=GDI/TextRenderer",
+                        StringComparison.Ordinal) >= 0,
+                    "Visual diagnostics did not report the text path.",
+                    failures);
+            }
+
+            using (var host = new PopupHostForm(
+                1.0f,
+                PopupVisualMode.Solid))
+            using (var card = new PopupCardControl(
+                new PopupEntry(
+                    "visual-key",
+                    "contact",
+                    "preview",
+                    false),
+                1.0f,
+                PopupVisualMode.Solid))
+            {
+                Expect(
+                    Math.Abs(host.Opacity - 1.0) < 0.001 &&
+                    host.TransparencyKey == Color.Empty,
+                    "Popup host used layered-window transparency.",
+                    failures);
+                Expect(
+                    !card.UsesLayeredTransparency,
+                    "Popup card reported layered transparency.",
+                    failures);
+                Expect(
+                    card.ClearsOpaqueWhiteBackground,
+                    "Solid mode did not keep its opaque white background.",
+                    failures);
+                card.ApplyVisual(0.5, 1.025);
+                Expect(
+                    Math.Abs(card.VisualScale - 1.02) < 0.001,
+                    "Popup card did not clamp scale to protect text clarity.",
+                    failures);
+                card.UpdateVisualMode(PopupVisualMode.Glass);
+                Expect(
+                    card.VisualMode == PopupVisualMode.Glass,
+                    "Popup card visual mode did not update.",
+                    failures);
+                Expect(
+                    card.CardTintAlpha >= 235 &&
+                    card.CardTintAlpha <= 245 &&
+                    card.TextColorsAreOpaque &&
+                    !card.ClearsOpaqueWhiteBackground,
+                    "Glass mode did not use translucent tint with opaque text.",
+                    failures);
+                var titleColor = card.TitleTextColor;
+                var bodyColor = card.BodyTextColor;
+                var closeColor = card.CloseTextColor;
+                Expect(
+                    titleColor.A == 255 &&
+                    titleColor.R < 100 &&
+                    titleColor.G < 100 &&
+                    titleColor.B < 120,
+                    "Glass title color was not opaque dark text.",
+                    failures);
+                Expect(
+                    bodyColor.A == 255 &&
+                    bodyColor.R < 130 &&
+                    bodyColor.G < 140 &&
+                    bodyColor.B < 150,
+                    "Glass body color was not opaque dark text.",
+                    failures);
+                Expect(
+                    closeColor.A == 255 &&
+                    closeColor.R < 130 &&
+                    closeColor.G < 140 &&
+                    closeColor.B < 150,
+                    "Glass close button color was not opaque dark text.",
+                    failures);
+                card.ApplyVisual(0.25, 1.0);
+                Expect(
+                    card.TitleTextColor == titleColor &&
+                    card.BodyTextColor == bodyColor &&
+                    card.CloseTextColor == closeColor,
+                    "Animation opacity changed text colors.",
+                    failures);
+                card.ApplyVisual(1.0, MotionSettings.UpdatePulseScale);
+                Expect(
+                    card.TitleTextColor == titleColor &&
+                    card.BodyTextColor == bodyColor &&
+                    card.CloseTextColor == closeColor,
+                    "Update pulse changed text colors.",
+                    failures);
+                PopupCardControl.DiagnosticBlackTextEnabled = true;
+                try
+                {
+                    card.ApplyVisual(1.0, 1.0);
+                    using (var bitmap = new Bitmap(card.Width, card.Height))
+                    {
+                        card.DrawToBitmap(
+                            bitmap,
+                            new Rectangle(
+                                0,
+                                0,
+                                card.Width,
+                                card.Height));
+                        Expect(
+                            ContainsDarkPixel(
+                                bitmap,
+                                new Rectangle(16, 16, 260, 44)),
+                            "DIAG BLACK TEXT did not render as a dark final text layer.",
+                            failures);
+                    }
+                }
+                finally
+                {
+                    PopupCardControl.DiagnosticBlackTextEnabled = false;
+                }
+                Expect(
+                    card.DiagnosticBlackTextDrawsLast,
+                    "Diagnostic black text is not marked as the final draw operation.",
+                    failures);
+                host.UpdateVisualMode(PopupVisualMode.Solid);
+                Expect(
+                    host.EffectiveVisualMode == PopupVisualMode.Solid &&
+                    !host.BackdropApplied,
+                    "Solid visual mode attempted to keep a DWM backdrop.",
+                    failures);
+            }
+        }
+
+        private static void TestWindowsToastDisplayMode(
+            ICollection<string> failures)
+        {
+            var settings = new NotificationFilterSettings();
+            Expect(
+                settings.NotificationDisplayMode ==
+                NotificationDisplayMode.WindowsToast,
+                "Default notification display mode was not WindowsToast.",
+                failures);
+            Expect(
+                !NotifierApplicationContext.ShouldUseCustomPopup(settings),
+                "WindowsToast mode would use the custom popup path.",
+                failures);
+            Expect(
+                NotifierApplicationContext.WindowsNotificationDurationSettingsUri ==
+                "ms-settings:easeofaccess-visualeffects",
+                "Windows notification duration settings URI changed unexpectedly.",
+                failures);
+
+            settings.NotificationDisplayMode = NotificationDisplayMode.CustomPopup;
+            Expect(
+                NotifierApplicationContext.ShouldUseCustomPopup(settings),
+                "CustomPopup mode did not enable the custom popup path.",
+                failures);
+
+            var directory = Path.Combine(
+                Path.GetTempPath(),
+                "WeChatMessageNotifier-WindowsToastTest-" +
+                Guid.NewGuid().ToString("N"));
+            try
+            {
+                var logger = new Logger(directory, 4096);
+                string activatedSession = null;
+                using (var notificationCenter = new WindowsNotificationCenter(
+                    delegate(string sessionKey)
+                    {
+                        activatedSession = sessionKey;
+                    },
+                    logger,
+                    false,
+                    false))
+                {
+                    var firstCount = notificationCenter.ShowMessage(
+                        "session-a",
+                        "联系人甲",
+                        "第一条",
+                        false,
+                        false);
+                    var firstTag = notificationCenter.GetTagForTest("session-a");
+                    var secondCount = notificationCenter.ShowMessage(
+                        "session-a",
+                        "联系人甲",
+                        "第二条",
+                        false,
+                        false);
+                    Expect(
+                        firstCount == 1 &&
+                        secondCount == 2 &&
+                        notificationCenter.ActiveSessionCountForTest == 1,
+                        "Same session did not aggregate into one Windows toast state.",
+                        failures);
+                    Expect(
+                        string.Equals(
+                            firstTag,
+                            notificationCenter.GetTagForTest("session-a"),
+                            StringComparison.Ordinal) &&
+                        string.Equals(
+                            firstTag,
+                            notificationCenter.LastTagForTest,
+                            StringComparison.Ordinal) &&
+                        notificationCenter.LastGroupForTest == "wechat",
+                        "Same session did not reuse a stable toast tag/group.",
+                        failures);
+                    Expect(
+                        notificationCenter.LastTitleForTest.IndexOf(
+                            "2\u6761\u65B0\u6D88\u606F",
+                            StringComparison.Ordinal) >= 0 &&
+                        notificationCenter.LastMessageForTest.IndexOf(
+                            "第二条",
+                            StringComparison.Ordinal) >= 0 &&
+                        !notificationCenter.LastSuppressPopupForTest,
+                        "Aggregated Windows toast title/body/suppression was wrong.",
+                        failures);
+
+                    notificationCenter.ShowMessage(
+                        "session-b",
+                        "联系人乙",
+                        "另一条",
+                        false,
+                        false);
+                    Expect(
+                        notificationCenter.ActiveSessionCountForTest == 2 &&
+                        !string.Equals(
+                            firstTag,
+                            notificationCenter.GetTagForTest("session-b"),
+                            StringComparison.Ordinal),
+                        "Different sessions did not keep separate toast states.",
+                        failures);
+
+                    notificationCenter.ShowMessage(
+                        "session-private",
+                        "联系人丙",
+                        "秘密正文",
+                        true,
+                        false);
+                    notificationCenter.ShowMessage(
+                        "session-private",
+                        "联系人丙",
+                        "新的秘密正文",
+                        true,
+                        false);
+                    Expect(
+                        notificationCenter.LastMessageForTest.IndexOf(
+                            "秘密",
+                            StringComparison.Ordinal) < 0 &&
+                        notificationCenter.LastMessageForTest.IndexOf(
+                            "2 \u6761\u65B0\u6D88\u606F",
+                            StringComparison.Ordinal) >= 0,
+                        "Privacy mode Windows toast leaked message body or count.",
+                        failures);
+
+                    notificationCenter.Show(
+                        "微信消息提醒器",
+                        "测试成功：Windows 系统通知工作正常。",
+                        false);
+                    Expect(
+                        !notificationCenter.LastSuppressPopupForTest,
+                        "Test notification did not request a Windows banner.",
+                        failures);
+
+                    notificationCenter.SimulateActivationForTest("session-a");
+                    Expect(
+                        activatedSession == "session-a",
+                        "Toast activation did not forward the target session key.",
+                        failures);
+                }
+
+                Expect(
+                    Program.ExtractToastActivationSessionKey(
+                        new[]
+                        {
+                            "--toast-activate",
+                            "wechat-message-notifier://open?session=session%20a"
+                        }) == "session a",
+                    "Toast protocol session key was not parsed.",
+                    failures);
+            }
+            finally
+            {
+                if (Directory.Exists(directory))
+                {
+                    Directory.Delete(directory, true);
+                }
+            }
+        }
+
+        private static void TestNotificationFilterSettings(
+            ICollection<string> failures)
+        {
+            var settings = new NotificationFilterSettings();
+            var kinds = new[]
+            {
+                ChatSessionKind.DirectContact,
+                ChatSessionKind.OfficialAccount,
+                ChatSessionKind.ServiceAccount,
+                ChatSessionKind.GroupChat,
+                ChatSessionKind.MutedGroupChat,
+                ChatSessionKind.Unknown
+            };
+
+            foreach (var kind in kinds)
+            {
+                Expect(
+                    settings.IsEnabled(kind),
+                    "Notification type was not enabled by default: " + kind,
+                    failures);
+                settings.SetEnabled(kind, false);
+                Expect(
+                    !settings.IsEnabled(kind),
+                    "Disabled notification type remained enabled: " + kind,
+                    failures);
+                Expect(
+                    !NotifierApplicationContext.ShouldDeliverNotification(
+                        settings,
+                        new ChatSession { Kind = kind }),
+                    "Disabled type passed the shared delivery gate: " + kind,
+                    failures);
+                settings.SetEnabled(kind, true);
+                Expect(
+                    settings.IsEnabled(kind),
+                    "Re-enabled notification type remained disabled: " + kind,
+                    failures);
+                Expect(
+                    NotifierApplicationContext.ShouldDeliverNotification(
+                        settings,
+                        new ChatSession { Kind = kind }),
+                    "Enabled type failed the shared delivery gate: " + kind,
+                    failures);
+            }
+
+            settings.SetOverride("a1b2c3d4", ChatSessionKind.OfficialAccount);
+            Expect(
+                settings.ResolveKind(
+                    "a1b2c3d4",
+                    ChatSessionKind.Unknown) ==
+                ChatSessionKind.OfficialAccount,
+                "Manual session kind override was not applied.",
+                failures);
+            Expect(
+                settings.ResolveKind(
+                    "ffffffff",
+                    ChatSessionKind.Unknown) ==
+                ChatSessionKind.Unknown,
+                "Unrelated session was affected by an override.",
+                failures);
+            settings.ClearOverride("a1b2c3d4");
+
+            var detector = new SessionChangeDetector();
+            var baseline = SessionParser.Parse(
+                "普通联系人\n旧消息\n11:00",
+                0,
+                "session_item_wxid_filter");
+            detector.Update(
+                new[] { baseline },
+                new DateTime(2026, 7, 2, 11, 0, 0));
+            var changed = SessionParser.Parse(
+                "普通联系人\n关闭期间的新消息\n11:01",
+                0,
+                "session_item_wxid_filter");
+            settings.SetEnabled(changed.Kind, false);
+            var filteredChanges = detector.Update(
+                new[] { changed },
+                new DateTime(2026, 7, 2, 11, 1, 0));
+            Expect(
+                filteredChanges.Count == 1 &&
+                !settings.IsEnabled(filteredChanges[0].Kind),
+                "Disabled type was not identified before delivery.",
+                failures);
+
+            settings.SetEnabled(changed.Kind, true);
+            var afterEnable = detector.Update(
+                new[] { changed },
+                new DateTime(2026, 7, 2, 11, 1, 5));
+            Expect(
+                afterEnable.Count == 0,
+                "Filtered message was replayed after its type was enabled.",
+                failures);
+
+            settings.Unknown = false;
+            var misclassifiedAccount = new ChatSession
+            {
+                Kind = ChatSessionKind.Unknown
+            };
+            Expect(
+                !NotifierApplicationContext.ShouldDeliverNotification(
+                    settings,
+                    misclassifiedAccount),
+                "Unknown switch did not block an unclassified account.",
+                failures);
+
+            var diagnosticSession = new ChatSession
+            {
+                Contact = "秘密联系人",
+                Preview = "秘密消息正文",
+                ContactHash = "a1b2c3d4",
+                Kind = ChatSessionKind.Unknown,
+                DetectedKind = ChatSessionKind.Unknown,
+                IsMuted = true,
+                IsSelected = false,
+                UnreadCount = 1,
+                RawLineCount = 5,
+                HasMutedLabel = true
+            };
+            var diagnostic =
+                NotifierApplicationContext.FormatCandidateDiagnostic(
+                    diagnosticSession,
+                    false,
+                    "Blocked");
+            Expect(
+                diagnostic.IndexOf("秘密联系人", StringComparison.Ordinal) < 0 &&
+                diagnostic.IndexOf("秘密消息正文", StringComparison.Ordinal) < 0 &&
+                diagnostic.IndexOf("ContactHash=a1b2c3d4", StringComparison.Ordinal) >= 0 &&
+                diagnostic.IndexOf("Result=Blocked", StringComparison.Ordinal) >= 0,
+                "Diagnostic output leaked private content or omitted metadata.",
+                failures);
+        }
+
+        private static void TestSettingsStore(
+            ICollection<string> failures)
+        {
+            var directory = Path.Combine(
+                Path.GetTempPath(),
+                "WeChatMessageNotifier-SettingsTest-" +
+                Guid.NewGuid().ToString("N"));
+            var path = Path.Combine(directory, "settings.json");
+            try
+            {
+                var logger = new Logger(directory, 4096);
+                var store = new SettingsStore(logger, path);
+                var missing = store.Load();
+                Expect(
+                    missing.DirectContact &&
+                    missing.OfficialAccount &&
+                    missing.ServiceAccount &&
+                    missing.GroupChat &&
+                    missing.MutedGroupChat &&
+                    missing.Unknown &&
+                    missing.NotificationDisplayMode ==
+                    NotificationDisplayMode.WindowsToast &&
+                    missing.MotionMode == MotionMode.Standard &&
+                    missing.PopupVisualMode == PopupVisualMode.Glass,
+                    "Missing settings file did not use the expected defaults.",
+                    failures);
+
+                missing.ServiceAccount = false;
+                missing.MutedGroupChat = false;
+                missing.NotificationDisplayMode =
+                    NotificationDisplayMode.CustomPopup;
+                missing.MotionMode = MotionMode.Reduced;
+                missing.PopupVisualMode = PopupVisualMode.Glass;
+                missing.SetOverride(
+                    "e5f6a7b8",
+                    ChatSessionKind.MutedGroupChat);
+                Expect(
+                    store.Save(missing),
+                    "Notification filter settings could not be saved.",
+                    failures);
+                var reloaded = store.Load();
+                Expect(
+                    !reloaded.ServiceAccount &&
+                    !reloaded.MutedGroupChat &&
+                    reloaded.DirectContact &&
+                    reloaded.NotificationDisplayMode ==
+                    NotificationDisplayMode.CustomPopup &&
+                    reloaded.MotionMode == MotionMode.Reduced &&
+                    reloaded.PopupVisualMode == PopupVisualMode.Glass &&
+                    reloaded.ResolveKind(
+                        "e5f6a7b8",
+                        ChatSessionKind.Unknown) ==
+                    ChatSessionKind.MutedGroupChat,
+                    "Saved notification filter settings were not restored.",
+                    failures);
+                var savedJson = File.ReadAllText(path);
+                Expect(
+                    savedJson.IndexOf(
+                        "\"enableOfficialAccount\"",
+                        StringComparison.Ordinal) >= 0 &&
+                    savedJson.IndexOf(
+                        "\"enableMutedGroupChat\"",
+                        StringComparison.Ordinal) >= 0 &&
+                    savedJson.IndexOf(
+                        "\"sessionKindOverrides\"",
+                        StringComparison.Ordinal) >= 0 &&
+                    savedJson.IndexOf(
+                        "\"notificationDisplayMode\": \"CustomPopup\"",
+                        StringComparison.Ordinal) >= 0 &&
+                    savedJson.IndexOf(
+                        "\"motionMode\": \"Reduced\"",
+                        StringComparison.Ordinal) >= 0 &&
+                    savedJson.IndexOf(
+                        "\"popupVisualMode\": \"Glass\"",
+                        StringComparison.Ordinal) >= 0,
+                    "Settings JSON did not use the documented property names.",
+                    failures);
+
+                var manuallyEdited = new NotificationFilterSettings();
+                manuallyEdited.Unknown = false;
+                manuallyEdited.NotificationDisplayMode =
+                    NotificationDisplayMode.WindowsToast;
+                manuallyEdited.MotionMode = MotionMode.Off;
+                manuallyEdited.PopupVisualMode = PopupVisualMode.Solid;
+                manuallyEdited.SetOverride(
+                    "11223344",
+                    ChatSessionKind.OfficialAccount);
+                File.WriteAllText(
+                    path,
+                    manuallyEdited.ToJson(),
+                    new System.Text.UTF8Encoding(false));
+                File.SetLastWriteTimeUtc(
+                    path,
+                    DateTime.UtcNow.AddSeconds(2));
+                Expect(
+                    store.ReloadIfChanged(reloaded) &&
+                    !reloaded.Unknown &&
+                    reloaded.NotificationDisplayMode ==
+                    NotificationDisplayMode.WindowsToast &&
+                    reloaded.MotionMode == MotionMode.Off &&
+                    reloaded.PopupVisualMode == PopupVisualMode.Solid &&
+                    reloaded.ResolveKind(
+                        "11223344",
+                        ChatSessionKind.Unknown) ==
+                    ChatSessionKind.OfficialAccount,
+                    "Manually edited settings were not hot reloaded.",
+                    failures);
+
+                File.WriteAllText(path, "{ damaged json", System.Text.Encoding.UTF8);
+                File.SetLastWriteTimeUtc(
+                    path,
+                    DateTime.UtcNow.AddSeconds(4));
+                var damaged = store.Load();
+                Expect(
+                    damaged.DirectContact &&
+                    damaged.OfficialAccount &&
+                    damaged.ServiceAccount &&
+                    damaged.GroupChat &&
+                    damaged.MutedGroupChat &&
+                    damaged.Unknown &&
+                    damaged.NotificationDisplayMode ==
+                    NotificationDisplayMode.WindowsToast &&
+                    damaged.MotionMode == MotionMode.Standard &&
+                    damaged.PopupVisualMode == PopupVisualMode.Glass,
+                    "Damaged settings did not fall back to defaults.",
+                    failures);
+            }
+            finally
+            {
+                if (Directory.Exists(directory))
+                {
+                    Directory.Delete(directory, true);
+                }
+            }
         }
 
         private static void TestLogRotation(ICollection<string> failures)
@@ -278,6 +2096,31 @@ namespace WeChatMessageNotifier
                     Directory.Delete(directory, true);
                 }
             }
+        }
+
+        private static bool ContainsDarkPixel(
+            Bitmap bitmap,
+            Rectangle area)
+        {
+            var left = Math.Max(0, area.Left);
+            var top = Math.Max(0, area.Top);
+            var right = Math.Min(bitmap.Width, area.Right);
+            var bottom = Math.Min(bitmap.Height, area.Bottom);
+            for (var y = top; y < bottom; y++)
+            {
+                for (var x = left; x < right; x++)
+                {
+                    var color = bitmap.GetPixel(x, y);
+                    if (color.A > 0 &&
+                        color.R < 48 &&
+                        color.G < 48 &&
+                        color.B < 48)
+                    {
+                        return true;
+                    }
+                }
+            }
+            return false;
         }
 
         private static void Expect(bool condition, string message, ICollection<string> failures)

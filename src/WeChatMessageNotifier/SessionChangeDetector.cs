@@ -10,26 +10,43 @@ namespace WeChatMessageNotifier
     internal sealed class SessionChangeDetector
     {
         internal static readonly TimeSpan DuplicateCooldown = TimeSpan.FromMinutes(5);
+        internal static readonly TimeSpan MissingSessionRetention = TimeSpan.FromHours(6);
+        internal const int MaximumRetainedSessions = 500;
 
         private Dictionary<string, ChatSession> previous =
             new Dictionary<string, ChatSession>(StringComparer.Ordinal);
         private readonly Dictionary<string, DateTime> recentlyNotified =
             new Dictionary<string, DateTime>(StringComparer.Ordinal);
+        private readonly Dictionary<string, DateTime> lastSeen =
+            new Dictionary<string, DateTime>(StringComparer.Ordinal);
         private bool initialized;
+
+        internal int LastOutgoingSuppressedCount { get; private set; }
+
+        internal int RetainedSessionCount
+        {
+            get { return previous.Count; }
+        }
 
         internal IList<ChatSession> Update(IList<ChatSession> current, DateTime now)
         {
+            return Update(current, now, false);
+        }
+
+        internal IList<ChatSession> Update(
+            IList<ChatSession> current,
+            DateTime now,
+            bool isWeChatForeground)
+        {
             var notifications = new List<ChatSession>();
-            // Retain sessions that temporarily disappear from the virtualized
-            // list. Reappearance must not turn the same row into a "new"
-            // conversation just because one UI Automation scan was partial.
-            var next = new Dictionary<string, ChatSession>(previous, StringComparer.Ordinal);
+            LastOutgoingSuppressedCount = 0;
 
             // UI Automation can briefly return an empty list while WeChat is
             // repainting. Keep the previous baseline so the same rows are not
             // mistaken for newly visible messages on the next poll.
             if (initialized && current.Count == 0)
             {
+                PruneMissingBaselines(now, new HashSet<string>(StringComparer.Ordinal));
                 return notifications;
             }
 
@@ -44,9 +61,22 @@ namespace WeChatMessageNotifier
                 recentlyNotified.Remove(signature);
             }
 
+            // Retain sessions that temporarily disappear from the virtualized
+            // list. Reappearance must not turn the same row into a "new"
+            // conversation just because one UI Automation scan was partial.
+            // The retention is deliberately bounded so a week-long tray
+            // process does not keep every historical row forever.
+            var protectedKeys = new HashSet<string>(StringComparer.Ordinal);
             foreach (var session in current)
             {
-                next[session.Contact] = session;
+                protectedKeys.Add(session.SessionKey);
+                lastSeen[session.SessionKey] = now;
+            }
+            var next = CreateRetainedBaseline(now, protectedKeys);
+
+            foreach (var session in current)
+            {
+                next[session.SessionKey] = session;
 
                 // The first scan is a baseline. Without this guard every
                 // existing conversation would appear as a new notification.
@@ -56,7 +86,7 @@ namespace WeChatMessageNotifier
                 }
 
                 ChatSession old;
-                var known = previous.TryGetValue(session.Contact, out old);
+                var known = previous.TryGetValue(session.SessionKey, out old);
                 var contentChanged =
                     known &&
                     !string.Equals(old.Signature, session.Signature, StringComparison.Ordinal);
@@ -68,8 +98,9 @@ namespace WeChatMessageNotifier
                     unreadCountAvailable &&
                     session.UnreadCount > old.UnreadCount;
                 // Prefer WeChat's explicit unread counter when available.
-                // Fall back to the existing content signature for rows that do
-                // not expose a counter (for example some muted conversations).
+                // Require an increase when both scans expose it. UIA can
+                // temporarily omit the counter, so only then fall back to the
+                // preview signature; outgoing previews are filtered below.
                 var changed = unreadCountAvailable
                     ? unreadCountIncreased
                     : contentChanged;
@@ -78,27 +109,117 @@ namespace WeChatMessageNotifier
                     session.Position <= 2 &&
                     (session.UnreadCount > 0 ||
                      SessionParser.IsRecentTimestamp(session.Timestamp, now));
+                var selectedForegroundPreviewOnlyChange =
+                    isWeChatForeground &&
+                    known &&
+                    session.IsSelected &&
+                    contentChanged &&
+                    !unreadCountIncreased &&
+                    session.UnreadCount <= 0;
 
-                if ((changed || newlyVisibleAndRecent) &&
-                    !SessionParser.LooksLikeOutgoing(session.Preview))
+                if (!(changed || newlyVisibleAndRecent))
                 {
-                    DateTime lastNotification;
-                    var duplicate =
-                        recentlyNotified.TryGetValue(session.Signature, out lastNotification) &&
-                        now - lastNotification < DuplicateCooldown;
-                    if (!duplicate)
-                    {
-                        notifications.Add(session);
-                        recentlyNotified[session.Signature] = now;
-                    }
+                    continue;
+                }
+
+                // Sending a message in the currently open conversation can
+                // change its UIA preview without any unread increment. This
+                // state-based guard is independent of preview wording and
+                // therefore covers formats LooksLikeOutgoing does not know.
+                if (selectedForegroundPreviewOnlyChange)
+                {
+                    continue;
+                }
+
+                if (SessionParser.LooksLikeOutgoing(session.Preview))
+                {
+                    LastOutgoingSuppressedCount++;
+                    continue;
+                }
+
+                DateTime lastNotification;
+                var duplicate =
+                    recentlyNotified.TryGetValue(session.Signature, out lastNotification) &&
+                    now - lastNotification < DuplicateCooldown;
+                if (!duplicate)
+                {
+                    notifications.Add(session);
+                    recentlyNotified[session.Signature] = now;
                 }
             }
 
             previous = next;
+            TrimRetainedBaselines(protectedKeys);
             initialized = true;
             return notifications
                 .OrderBy(delegate(ChatSession session) { return session.Position; })
                 .ToList();
+        }
+
+        private Dictionary<string, ChatSession> CreateRetainedBaseline(
+            DateTime now,
+            HashSet<string> protectedKeys)
+        {
+            var next = new Dictionary<string, ChatSession>(StringComparer.Ordinal);
+            foreach (var item in previous)
+            {
+                DateTime seenAt;
+                if (!lastSeen.TryGetValue(item.Key, out seenAt))
+                {
+                    seenAt = now;
+                    lastSeen[item.Key] = seenAt;
+                }
+
+                if (protectedKeys.Contains(item.Key) ||
+                    now - seenAt <= MissingSessionRetention)
+                {
+                    next[item.Key] = item.Value;
+                }
+                else
+                {
+                    lastSeen.Remove(item.Key);
+                }
+            }
+            return next;
+        }
+
+        private void PruneMissingBaselines(
+            DateTime now,
+            HashSet<string> protectedKeys)
+        {
+            previous = CreateRetainedBaseline(now, protectedKeys);
+            TrimRetainedBaselines(protectedKeys);
+        }
+
+        private void TrimRetainedBaselines(HashSet<string> protectedKeys)
+        {
+            if (previous.Count <= MaximumRetainedSessions)
+            {
+                return;
+            }
+
+            foreach (var key in lastSeen
+                .OrderBy(delegate(KeyValuePair<string, DateTime> item)
+                {
+                    return item.Value;
+                })
+                .Select(delegate(KeyValuePair<string, DateTime> item)
+                {
+                    return item.Key;
+                })
+                .ToArray())
+            {
+                if (previous.Count <= MaximumRetainedSessions)
+                {
+                    return;
+                }
+                if (protectedKeys.Contains(key))
+                {
+                    continue;
+                }
+                previous.Remove(key);
+                lastSeen.Remove(key);
+            }
         }
     }
 }

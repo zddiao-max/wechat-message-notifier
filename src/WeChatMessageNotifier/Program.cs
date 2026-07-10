@@ -2,6 +2,8 @@
 // under the direction of the project owner.
 
 using System;
+using System.IO;
+using System.Text;
 using System.Threading;
 using System.Windows.Forms;
 
@@ -11,6 +13,7 @@ namespace WeChatMessageNotifier
     {
         internal const string ActivationEventName =
             "Local\\WeChatMessageNotifier.ToastActivation";
+        private const string ProtocolName = "wechat-message-notifier://";
 
         // The application uses a named mutex so only one tray monitor can run
         // for the current Windows session.
@@ -25,6 +28,7 @@ namespace WeChatMessageNotifier
                     using (var existingEvent = EventWaitHandle.OpenExisting(
                         ActivationEventName))
                     {
+                        WriteActivationPayload(args);
                         existingEvent.Set();
                         return 0;
                     }
@@ -33,6 +37,7 @@ namespace WeChatMessageNotifier
                 {
                     // No notifier is running yet. Continue startup and seed
                     // the activation event so the new instance opens WeChat.
+                    WriteActivationPayload(args);
                 }
             }
 
@@ -63,6 +68,10 @@ namespace WeChatMessageNotifier
                     return 0;
                 }
 
+                // This project is built with the .NET Framework csc.exe, so
+                // Application.SetHighDpiMode is not available. Per-monitor
+                // DPI awareness is declared in app.manifest and the popup UI
+                // scales its own WinForms sizes from the active monitor DPI.
                 Application.EnableVisualStyles();
                 Application.SetCompatibleTextRenderingDefault(false);
                 Application.Run(new NotifierApplicationContext(args, activationEvent));
@@ -79,13 +88,126 @@ namespace WeChatMessageNotifier
                         "--toast-activate",
                         StringComparison.OrdinalIgnoreCase) ||
                     value.StartsWith(
-                        "wechat-message-notifier://",
+                        ProtocolName,
                         StringComparison.OrdinalIgnoreCase))
                 {
                     return true;
                 }
             }
             return false;
+        }
+
+        internal static string ReadActivationPayload()
+        {
+            try
+            {
+                var path = GetActivationPayloadPath();
+                if (!File.Exists(path))
+                {
+                    return null;
+                }
+
+                var value = File.ReadAllText(path, Encoding.UTF8);
+                File.Delete(path);
+                return string.IsNullOrWhiteSpace(value) ? null : value;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        internal static string ExtractToastActivationSessionKey(string[] args)
+        {
+            if (args == null)
+            {
+                return null;
+            }
+
+            foreach (var value in args)
+            {
+                if (value != null &&
+                    value.StartsWith(
+                        ProtocolName,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    return ExtractSessionFromUri(value);
+                }
+            }
+
+            return null;
+        }
+
+        private static void WriteActivationPayload(string[] args)
+        {
+            var sessionKey = ExtractToastActivationSessionKey(args);
+            if (string.IsNullOrWhiteSpace(sessionKey))
+            {
+                return;
+            }
+
+            try
+            {
+                var path = GetActivationPayloadPath();
+                Directory.CreateDirectory(Path.GetDirectoryName(path));
+                File.WriteAllText(
+                    path,
+                    sessionKey,
+                    new UTF8Encoding(false));
+            }
+            catch
+            {
+                // Toast activation must never fail just because the transient
+                // payload file could not be written. The running instance will
+                // still open WeChat without a target session.
+            }
+        }
+
+        private static string ExtractSessionFromUri(string value)
+        {
+            try
+            {
+                var uri = new Uri(value);
+                var query = uri.Query;
+                if (string.IsNullOrEmpty(query))
+                {
+                    return null;
+                }
+
+                if (query.StartsWith("?", StringComparison.Ordinal))
+                {
+                    query = query.Substring(1);
+                }
+
+                foreach (var pair in query.Split('&'))
+                {
+                    var parts = pair.Split(new[] { '=' }, 2);
+                    if (parts.Length == 2 &&
+                        string.Equals(
+                            parts[0],
+                            "session",
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        return Uri.UnescapeDataString(
+                            parts[1].Replace("+", " "));
+                    }
+                }
+            }
+            catch
+            {
+                return null;
+            }
+
+            return null;
+        }
+
+        private static string GetActivationPayloadPath()
+        {
+            return Path.Combine(
+                Environment.GetFolderPath(
+                    Environment.SpecialFolder.LocalApplicationData),
+                "WeChatMessageNotifier",
+                "toast-activation.txt");
         }
 
         private static int RunIntegrationTest()
@@ -103,6 +225,15 @@ namespace WeChatMessageNotifier
 
                 Console.WriteLine(
                     "INTEGRATION-TEST PASSED: sessionCount=" + monitor.LastSessionCount +
+                    " selectedCount=" + monitor.LastSelectedSessionCount +
+                    " mutedCount=" + monitor.LastMutedSessionCount +
+                    " groupMarkerCount=" + monitor.LastGroupMarkerCount +
+                    " direct=" + monitor.GetLastSessionKindCount(ChatSessionKind.DirectContact) +
+                    " official=" + monitor.GetLastSessionKindCount(ChatSessionKind.OfficialAccount) +
+                    " service=" + monitor.GetLastSessionKindCount(ChatSessionKind.ServiceAccount) +
+                    " group=" + monitor.GetLastSessionKindCount(ChatSessionKind.GroupChat) +
+                    " mutedGroup=" + monitor.GetLastSessionKindCount(ChatSessionKind.MutedGroupChat) +
+                    " unknown=" + monitor.GetLastSessionKindCount(ChatSessionKind.Unknown) +
                     " contentWasNotPrinted=true");
                 return 0;
             }

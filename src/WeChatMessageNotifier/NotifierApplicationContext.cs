@@ -12,6 +12,9 @@ namespace WeChatMessageNotifier
 {
     internal sealed class NotifierApplicationContext : ApplicationContext
     {
+        internal const string WindowsNotificationDurationSettingsUri =
+            "ms-settings:easeofaccess-visualeffects";
+
         // The tray application owns all timers and UI objects on one STA thread,
         // avoiding cross-thread access to WinForms and UI Automation objects.
         private readonly Logger logger;
@@ -24,9 +27,24 @@ namespace WeChatMessageNotifier
         private readonly EventWaitHandle activationEvent;
         private readonly ToolStripMenuItem pauseItem;
         private readonly ToolStripMenuItem privacyItem;
+        private readonly ToolStripMenuItem diagnosticNextItem;
+        private readonly ToolStripMenuItem windowsToastItem;
+        private readonly ToolStripMenuItem customPopupItem;
+        private readonly ToolStripMenuItem motionItem;
+        private readonly ToolStripMenuItem standardMotionItem;
+        private readonly ToolStripMenuItem reducedMotionItem;
+        private readonly ToolStripMenuItem offMotionItem;
+        private readonly ToolStripMenuItem visualItem;
+        private readonly ToolStripMenuItem autoVisualItem;
+        private readonly ToolStripMenuItem glassVisualItem;
+        private readonly ToolStripMenuItem solidVisualItem;
+        private readonly NotificationFilterSettings notificationFilters;
+        private readonly SettingsStore settingsStore;
         private bool paused;
         private bool privacyMode;
         private bool suppressWhenWeChatForeground;
+        private bool visualDiagnosticsLogged;
+        private string pendingActivationSessionKey;
 
         internal NotifierApplicationContext(
             string[] args,
@@ -34,11 +52,21 @@ namespace WeChatMessageNotifier
         {
             this.activationEvent = activationEvent;
             logger = new Logger();
+            settingsStore = new SettingsStore(logger);
+            notificationFilters = settingsStore.Load();
+            settingsStore.Save(notificationFilters);
             monitor = new WeChatMonitor(logger);
-            popupManager = new PopupManager(monitor.ActivateWeChat);
+            popupManager = new PopupManager(
+                monitor.ActivateWeChat,
+                true,
+                notificationFilters.MotionMode,
+                notificationFilters.PopupVisualMode);
             notificationCenter = new WindowsNotificationCenter(
                 monitor.ActivateWeChat,
                 logger);
+            pendingActivationSessionKey =
+                Program.ExtractToastActivationSessionKey(args) ??
+                Program.ReadActivationPayload();
 
             privacyMode = HasArgument(args, "--privacy");
             // A notification click brings WeChat to the foreground. Suppressing
@@ -62,27 +90,93 @@ namespace WeChatMessageNotifier
                 Checked = privacyMode,
                 CheckOnClick = true
             };
-            privacyItem.CheckedChanged += delegate { privacyMode = privacyItem.Checked; };
+            privacyItem.CheckedChanged += delegate
+            {
+                privacyMode = privacyItem.Checked;
+                popupManager.SetPrivacyMode(privacyMode);
+            };
+
+            var notificationDisplayItem = new ToolStripMenuItem(
+                "\u63D0\u9192\u65B9\u5F0F");
+            windowsToastItem = CreateNotificationDisplayModeItem(
+                "Windows \u7CFB\u7EDF\u901A\u77E5",
+                NotificationDisplayMode.WindowsToast);
+            customPopupItem = CreateNotificationDisplayModeItem(
+                "\u81EA\u5B9A\u4E49\u5F39\u7A97",
+                NotificationDisplayMode.CustomPopup);
+            notificationDisplayItem.DropDownItems.Add(windowsToastItem);
+            notificationDisplayItem.DropDownItems.Add(customPopupItem);
+
+            var notificationTypesItem = new ToolStripMenuItem("\u63D0\u9192\u7C7B\u578B");
+            notificationTypesItem.DropDownItems.Add(
+                CreateFilterItem(
+                    "\u666E\u901A\u8054\u7CFB\u4EBA\u63D0\u9192",
+                    ChatSessionKind.DirectContact));
+            notificationTypesItem.DropDownItems.Add(
+                CreateFilterItem(
+                    "\u516C\u4F17\u53F7\u63D0\u9192",
+                    ChatSessionKind.OfficialAccount));
+            notificationTypesItem.DropDownItems.Add(
+                CreateFilterItem(
+                    "\u670D\u52A1\u53F7\u63D0\u9192",
+                    ChatSessionKind.ServiceAccount));
+            notificationTypesItem.DropDownItems.Add(
+                CreateFilterItem(
+                    "\u666E\u901A\u7FA4\u804A\u63D0\u9192",
+                    ChatSessionKind.GroupChat));
+            notificationTypesItem.DropDownItems.Add(
+                CreateFilterItem(
+                    "\u514D\u6253\u6270\u7FA4\u804A\u63D0\u9192",
+                    ChatSessionKind.MutedGroupChat));
+            notificationTypesItem.DropDownItems.Add(
+                CreateFilterItem(
+                    "\u672A\u77E5\u7C7B\u578B\u63D0\u9192",
+                    ChatSessionKind.Unknown));
+
+            motionItem = new ToolStripMenuItem(
+                "\u52A8\u753B\u6548\u679C");
+            standardMotionItem = CreateMotionModeItem(
+                "\u6807\u51C6\u52A8\u753B",
+                MotionMode.Standard);
+            reducedMotionItem = CreateMotionModeItem(
+                "\u51CF\u5F31\u52A8\u753B",
+                MotionMode.Reduced);
+            offMotionItem = CreateMotionModeItem(
+                "\u5173\u95ED\u52A8\u753B",
+                MotionMode.Off);
+            motionItem.DropDownItems.Add(standardMotionItem);
+            motionItem.DropDownItems.Add(reducedMotionItem);
+            motionItem.DropDownItems.Add(offMotionItem);
+
+            visualItem = new ToolStripMenuItem(
+                "\u5916\u89C2\u6548\u679C");
+            autoVisualItem = CreateVisualModeItem(
+                "\u81EA\u52A8",
+                PopupVisualMode.Auto);
+            glassVisualItem = CreateVisualModeItem(
+                "Windows 11 \u6BDB\u73BB\u7483",
+                PopupVisualMode.Glass);
+            solidVisualItem = CreateVisualModeItem(
+                "\u6E05\u6670\u5B9E\u8272",
+                PopupVisualMode.Solid);
+            visualItem.DropDownItems.Add(autoVisualItem);
+            visualItem.DropDownItems.Add(glassVisualItem);
+            visualItem.DropDownItems.Add(solidVisualItem);
 
             var testItem = new ToolStripMenuItem("发送测试通知");
             testItem.Click += delegate
             {
-                var popupShown = true;
-                try
-                {
-                    popupManager.Show(
-                        "微信消息提醒器",
-                        "测试成功：消息弹窗与通知中心工作正常。");
-                }
-                catch (Exception exception)
-                {
-                    popupShown = false;
-                    logger.Error("Test popup failed", exception);
-                }
                 notificationCenter.Show(
                     "微信消息提醒器",
-                    "测试成功：消息弹窗与通知中心工作正常。",
-                    popupShown);
+                    "测试成功：Windows 系统通知工作正常。",
+                    false);
+            };
+
+            var notificationDurationSettingsItem =
+                new ToolStripMenuItem("打开 Windows 通知时长设置");
+            notificationDurationSettingsItem.Click += delegate
+            {
+                OpenWindowsNotificationDurationSettings();
             };
 
             var logItem = new ToolStripMenuItem("打开日志");
@@ -98,15 +192,48 @@ namespace WeChatMessageNotifier
                 }
             };
 
+            diagnosticNextItem = new ToolStripMenuItem(
+                "\u4E0B\u4E00\u6B21\u63D0\u9192\u663E\u793A\u5206\u7C7B")
+            {
+                CheckOnClick = true
+            };
+
+            var settingsItem = new ToolStripMenuItem(
+                "\u6253\u5F00\u8BBE\u7F6E\u6587\u4EF6");
+            settingsItem.Click += delegate
+            {
+                try
+                {
+                    settingsStore.Save(notificationFilters);
+                    Process.Start(
+                        "notepad.exe",
+                        "\"" + settingsStore.Path + "\"");
+                }
+                catch (Exception exception)
+                {
+                    logger.Error("Could not open settings file", exception);
+                }
+            };
+
+            var diagnosticItem = new ToolStripMenuItem("\u8BCA\u65AD");
+            diagnosticItem.DropDownItems.Add(diagnosticNextItem);
+            diagnosticItem.DropDownItems.Add(settingsItem);
+            diagnosticItem.DropDownItems.Add(logItem);
+
             var exitItem = new ToolStripMenuItem("退出");
             exitItem.Click += delegate { Exit(); };
 
             var menu = new ContextMenuStrip();
             menu.Items.Add(pauseItem);
             menu.Items.Add(privacyItem);
+            menu.Items.Add(notificationDisplayItem);
+            menu.Items.Add(notificationTypesItem);
+            menu.Items.Add(motionItem);
+            menu.Items.Add(visualItem);
+            menu.Items.Add(diagnosticItem);
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add(testItem);
-            menu.Items.Add(logItem);
+            menu.Items.Add(notificationDurationSettingsItem);
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add(exitItem);
 
@@ -117,7 +244,13 @@ namespace WeChatMessageNotifier
                 Visible = true,
                 ContextMenuStrip = menu
             };
-            trayIcon.DoubleClick += delegate { popupManager.Show("微信消息提醒器", "程序正在监控微信会话列表。"); };
+            trayIcon.DoubleClick += delegate
+            {
+                notificationCenter.Show(
+                    "微信消息提醒器",
+                    "程序正在监控微信会话列表。",
+                    false);
+            };
 
             pollTimer = new Timer { Interval = 1500 };
             pollTimer.Tick += Poll;
@@ -129,13 +262,20 @@ namespace WeChatMessageNotifier
                 if (this.activationEvent.WaitOne(0))
                 {
                     logger.Info("Notification center entry activated.");
-                    monitor.ActivateWeChat();
+                    var sessionKey =
+                        Program.ReadActivationPayload() ??
+                        pendingActivationSessionKey;
+                    pendingActivationSessionKey = null;
+                    monitor.ActivateWeChat(sessionKey);
                 }
             };
             activationTimer.Start();
 
             logger.Info("Application started. Message content is not written to the log.");
-            popupManager.Show("微信消息提醒器", "已启动，本地监控微信新消息。");
+            logger.Info(
+                "Notification display mode=" +
+                notificationFilters.NotificationDisplayMode);
+            UpdateCustomPopupMenuState();
         }
 
         private void Poll(object sender, EventArgs eventArgs)
@@ -145,6 +285,36 @@ namespace WeChatMessageNotifier
                 return;
             }
 
+            if (settingsStore.ReloadIfChanged(notificationFilters))
+            {
+                popupManager.SetMotionMode(notificationFilters.MotionMode);
+                popupManager.SetVisualMode(notificationFilters.PopupVisualMode);
+                visualDiagnosticsLogged = false;
+                if (notificationFilters.NotificationDisplayMode ==
+                    NotificationDisplayMode.CustomPopup)
+                {
+                    LogVisualDiagnosticsOnce();
+                }
+                windowsToastItem.Checked =
+                    notificationFilters.NotificationDisplayMode ==
+                    NotificationDisplayMode.WindowsToast;
+                customPopupItem.Checked =
+                    notificationFilters.NotificationDisplayMode ==
+                    NotificationDisplayMode.CustomPopup;
+                standardMotionItem.Checked =
+                    notificationFilters.MotionMode == MotionMode.Standard;
+                reducedMotionItem.Checked =
+                    notificationFilters.MotionMode == MotionMode.Reduced;
+                offMotionItem.Checked =
+                    notificationFilters.MotionMode == MotionMode.Off;
+                autoVisualItem.Checked =
+                    notificationFilters.PopupVisualMode == PopupVisualMode.Auto;
+                glassVisualItem.Checked =
+                    notificationFilters.PopupVisualMode == PopupVisualMode.Glass;
+                solidVisualItem.Checked =
+                    notificationFilters.PopupVisualMode == PopupVisualMode.Solid;
+                UpdateCustomPopupMenuState();
+            }
             var changes = monitor.Poll();
             if (changes.Count == 0)
             {
@@ -160,26 +330,75 @@ namespace WeChatMessageNotifier
 
             foreach (var session in changes)
             {
-                var body = privacyMode ? "收到一条新消息" : Limit(session.Preview, 180);
+                session.Kind = notificationFilters.ResolveKind(
+                    session.ContactHash,
+                    session.DetectedKind);
+                var filterEnabled = ShouldDeliverNotification(
+                    notificationFilters,
+                    session);
+                if (diagnosticNextItem.Checked)
+                {
+                    LogCandidateDiagnostic(
+                        session,
+                        filterEnabled,
+                        filterEnabled ? "Allowed" : "Blocked");
+                    diagnosticNextItem.Checked = false;
+                }
+
+                if (!filterEnabled)
+                {
+                    logger.Info(
+                        "Notification filtered. ContactHash=" +
+                        session.ContactHash +
+                        " Kind=" +
+                        session.Kind +
+                        " Count=1");
+                    continue;
+                }
+
+                var preview = Limit(session.Preview, 180);
                 var title = Limit(session.Contact, 80);
-                var popupShown = true;
-                try
+                var contactMessageCount = 0;
+                if (notificationFilters.NotificationDisplayMode ==
+                    NotificationDisplayMode.WindowsToast)
                 {
-                    // Keep the full contact name as the popup's navigation key.
-                    // The label already truncates visually when necessary.
-                    popupManager.Show(session.Contact, body);
+                    contactMessageCount = notificationCenter.ShowMessage(
+                        session.SessionKey,
+                        title,
+                        preview,
+                        privacyMode,
+                        false);
                 }
-                catch (Exception exception)
+                else
                 {
-                    popupShown = false;
-                    logger.Error("Custom notification popup failed", exception);
+                    try
+                    {
+                        // Use the stable UIA session identity for aggregation
+                        // and navigation while keeping the display contact
+                        // unchanged.
+                        var entry = popupManager.Show(
+                            session.SessionKey,
+                            session.Contact,
+                            preview,
+                            privacyMode);
+                        LogVisualDiagnosticsOnce();
+                        contactMessageCount = entry.MessageCount;
+                    }
+                    catch (Exception exception)
+                    {
+                        logger.Error("Custom notification popup failed", exception);
+                    }
                 }
-                // Normally this is a silent history entry. If the custom
-                // popup fails, Windows displays its own banner as a fallback.
-                notificationCenter.Show(title, body, popupShown);
                 logger.Info(
                     "Notification shown. ContactLength=" + session.Contact.Length +
-                    " PreviewLength=" + session.Preview.Length);
+                    " PreviewLength=" + session.Preview.Length +
+                    " DisplayMode=" + notificationFilters.NotificationDisplayMode +
+                    " ActiveCards=" +
+                    (notificationFilters.NotificationDisplayMode ==
+                        NotificationDisplayMode.CustomPopup
+                        ? popupManager.ActiveCount
+                        : 0) +
+                    " ContactMessageCount=" + contactMessageCount);
             }
         }
 
@@ -188,12 +407,30 @@ namespace WeChatMessageNotifier
             pollTimer.Stop();
             activationTimer.Stop();
             popupManager.CloseAll();
+            notificationCenter.Dispose();
             trayIcon.Visible = false;
             trayIcon.Dispose();
             pollTimer.Dispose();
             activationTimer.Dispose();
             logger.Info("Application exited.");
             ExitThread();
+        }
+
+        private void OpenWindowsNotificationDurationSettings()
+        {
+            try
+            {
+                Process.Start(
+                    "explorer.exe",
+                    WindowsNotificationDurationSettingsUri);
+                logger.Info("Opened Windows notification duration settings.");
+            }
+            catch (Exception exception)
+            {
+                logger.Error(
+                    "Could not open Windows notification duration settings",
+                    exception);
+            }
         }
 
         private static bool HasArgument(string[] args, string expected)
@@ -206,6 +443,183 @@ namespace WeChatMessageNotifier
                 }
             }
             return false;
+        }
+
+        internal static bool ShouldDeliverNotification(
+            NotificationFilterSettings settings,
+            ChatSession session)
+        {
+            return settings != null &&
+                   session != null &&
+                   settings.IsEnabled(session.Kind);
+        }
+
+        internal static bool ShouldUseCustomPopup(
+            NotificationFilterSettings settings)
+        {
+            return settings != null &&
+                   settings.NotificationDisplayMode ==
+                   NotificationDisplayMode.CustomPopup;
+        }
+
+        private ToolStripMenuItem CreateNotificationDisplayModeItem(
+            string text,
+            NotificationDisplayMode mode)
+        {
+            var item = new ToolStripMenuItem(text)
+            {
+                Checked = notificationFilters.NotificationDisplayMode == mode
+            };
+            item.Click += delegate { SetNotificationDisplayMode(mode); };
+            return item;
+        }
+
+        private ToolStripMenuItem CreateFilterItem(
+            string text,
+            ChatSessionKind kind)
+        {
+            var item = new ToolStripMenuItem(text)
+            {
+                Checked = notificationFilters.IsEnabled(kind),
+                CheckOnClick = true
+            };
+            item.CheckedChanged += delegate
+            {
+                notificationFilters.SetEnabled(kind, item.Checked);
+                settingsStore.Save(notificationFilters);
+            };
+            return item;
+        }
+
+        private ToolStripMenuItem CreateMotionModeItem(
+            string text,
+            MotionMode mode)
+        {
+            var item = new ToolStripMenuItem(text)
+            {
+                Checked = notificationFilters.MotionMode == mode
+            };
+            item.Click += delegate { SetMotionMode(mode); };
+            return item;
+        }
+
+        private ToolStripMenuItem CreateVisualModeItem(
+            string text,
+            PopupVisualMode mode)
+        {
+            var item = new ToolStripMenuItem(text)
+            {
+                Checked = notificationFilters.PopupVisualMode == mode
+            };
+            item.Click += delegate { SetVisualMode(mode); };
+            return item;
+        }
+
+        private void SetMotionMode(MotionMode mode)
+        {
+            notificationFilters.MotionMode = mode;
+            popupManager.SetMotionMode(mode);
+            standardMotionItem.Checked = mode == MotionMode.Standard;
+            reducedMotionItem.Checked = mode == MotionMode.Reduced;
+            offMotionItem.Checked = mode == MotionMode.Off;
+            settingsStore.Save(notificationFilters);
+        }
+
+        private void SetNotificationDisplayMode(NotificationDisplayMode mode)
+        {
+            notificationFilters.NotificationDisplayMode = mode;
+            windowsToastItem.Checked = mode == NotificationDisplayMode.WindowsToast;
+            customPopupItem.Checked = mode == NotificationDisplayMode.CustomPopup;
+            UpdateCustomPopupMenuState();
+            if (mode == NotificationDisplayMode.CustomPopup)
+            {
+                visualDiagnosticsLogged = false;
+                LogVisualDiagnosticsOnce();
+            }
+            settingsStore.Save(notificationFilters);
+            logger.Info("Notification display mode changed to " + mode + ".");
+        }
+
+        private void UpdateCustomPopupMenuState()
+        {
+            var customPopupMode =
+                notificationFilters.NotificationDisplayMode ==
+                NotificationDisplayMode.CustomPopup;
+            motionItem.Enabled = customPopupMode;
+            visualItem.Enabled = customPopupMode;
+            motionItem.Text = customPopupMode
+                ? "\u52A8\u753B\u6548\u679C"
+                : "\u52A8\u753B\u6548\u679C\uFF08\u4EC5\u81EA\u5B9A\u4E49\u5F39\u7A97\uFF09";
+            visualItem.Text = customPopupMode
+                ? "\u5916\u89C2\u6548\u679C"
+                : "\u5916\u89C2\u6548\u679C\uFF08\u4EC5\u81EA\u5B9A\u4E49\u5F39\u7A97\uFF09";
+        }
+
+        private void SetVisualMode(PopupVisualMode mode)
+        {
+            notificationFilters.PopupVisualMode = mode;
+            popupManager.SetVisualMode(mode);
+            visualDiagnosticsLogged = false;
+            LogVisualDiagnosticsOnce();
+            autoVisualItem.Checked = mode == PopupVisualMode.Auto;
+            glassVisualItem.Checked = mode == PopupVisualMode.Glass;
+            solidVisualItem.Checked = mode == PopupVisualMode.Solid;
+            settingsStore.Save(notificationFilters);
+        }
+
+        private void LogVisualDiagnosticsOnce()
+        {
+            if (visualDiagnosticsLogged)
+            {
+                return;
+            }
+
+            logger.Info(popupManager.LastVisualDiagnostics);
+            visualDiagnosticsLogged = true;
+        }
+
+        private void LogCandidateDiagnostic(
+            ChatSession session,
+            bool filterEnabled,
+            string result)
+        {
+            logger.Info(FormatCandidateDiagnostic(
+                session,
+                filterEnabled,
+                result));
+        }
+
+        internal static string FormatCandidateDiagnostic(
+            ChatSession session,
+            bool filterEnabled,
+            string result)
+        {
+            return "Notification candidate: ContactHash=" +
+                session.ContactHash +
+                ", Kind=" +
+                session.Kind +
+                ", DetectedKind=" +
+                session.DetectedKind +
+                ", IsMuted=" +
+                session.IsMuted +
+                ", IsSelected=" +
+                session.IsSelected +
+                ", UnreadCount=" +
+                session.UnreadCount +
+                ", FilterEnabled=" +
+                filterEnabled +
+                ", Result=" +
+                result +
+                ", RawLineCount=" +
+                session.RawLineCount +
+                ", HasServiceLabel=" +
+                session.HasServiceLabel +
+                ", HasOfficialLabel=" +
+                session.HasOfficialLabel +
+                ", HasMutedLabel=" +
+                session.HasMutedLabel +
+                ", HasGroupMarker=" +
+                session.HasGroupMarker;
         }
 
         private static string Limit(string value, int maximum)

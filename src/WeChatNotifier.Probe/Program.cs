@@ -155,12 +155,16 @@ namespace WeChatNotifier.Probe
                     var item = items[itemIndex];
                     var itemRect = SafeRect(item);
                     var itemName = SafeString(delegate { return item.Current.Name; });
+                    var automationId = SafeString(
+                        delegate { return item.Current.AutomationId; });
                     var children = item.FindAll(TreeScope.Children, Condition.TrueCondition);
 
                     Console.WriteLine(
                         "    Item[" + itemIndex + "] rect=" + FormatRect(itemRect) +
                         " nameLength=" + itemName.Length +
                         " nameLines=" + CountLines(itemName) +
+                        " automationIdLength=" + automationId.Length +
+                        " automationIdShape=" + MaskContent(automationId) +
                         " children=" + children.Count +
                         " invoke=" + Supports(item, InvokePattern.Pattern) +
                         " select=" + Supports(item, SelectionItemPattern.Pattern) +

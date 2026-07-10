@@ -41,6 +41,10 @@ namespace WeChatMessageNotifier
             StringComparer.Ordinal);
 
         private const string ServiceAccountLabel = "\u670D\u52A1\u53F7";
+        private const string SubscriptionAccountLabel = "\u8BA2\u9605\u53F7";
+        private const string OfficialAccountLabel = "\u516C\u4F17\u53F7";
+        private const string MutedLabel = "\u6D88\u606F\u514D\u6253\u6270";
+        private const string GroupChatLabel = "\u7FA4\u804A";
 
         internal static ChatSession Parse(string rawName, int position, string automationId = null)
         {
@@ -64,15 +68,19 @@ namespace WeChatMessageNotifier
             }
 
             var contact = lines[0];
+            var sessionKey = contact;
             const string SessionItemPrefix = "session_item_";
-            if (!string.IsNullOrWhiteSpace(automationId) &&
+            var hasStableAutomationId =
+                !string.IsNullOrWhiteSpace(automationId) &&
                 automationId.StartsWith(SessionItemPrefix, StringComparison.Ordinal) &&
-                automationId.Length > SessionItemPrefix.Length)
+                automationId.Length > SessionItemPrefix.Length;
+            if (hasStableAutomationId)
             {
                 // WeChat 4.x exposes a stable session identity through the
-                // AutomationId. Reuse it instead of presentation text that can
-                // gain or lose pin/unread labels between UI refreshes.
-                contact = automationId.Substring(SessionItemPrefix.Length);
+                // AutomationId. Keep it separate from the display name so a
+                // stable identity can merge notifications without changing
+                // what the user sees on the card.
+                sessionKey = automationId.Substring(SessionItemPrefix.Length);
             }
 
             var timestampIndex = -1;
@@ -135,17 +143,86 @@ namespace WeChatMessageNotifier
             }
 
             var timestamp = timestampIndex >= 0 ? lines[timestampIndex] : string.Empty;
+            var hasServiceLabel = ContainsExactLine(
+                lines,
+                ServiceAccountLabel);
+            var hasOfficialLabel =
+                ContainsExactLine(lines, SubscriptionAccountLabel) ||
+                ContainsExactLine(lines, OfficialAccountLabel);
+            var isMuted = ContainsExactLine(lines, MutedLabel);
+            var hasGroupMarker =
+                sessionKey.IndexOf(
+                    "@chatroom",
+                    StringComparison.OrdinalIgnoreCase) >= 0 ||
+                ContainsExactLine(lines, GroupChatLabel);
+            var kind = Classify(
+                hasServiceLabel,
+                hasOfficialLabel,
+                isMuted,
+                hasGroupMarker);
             return new ChatSession
             {
+                SessionKey = sessionKey,
                 Contact = contact,
                 Preview = preview,
                 Timestamp = timestamp,
                 UnreadCount = unreadCount,
                 Position = position,
+                Kind = kind,
+                DetectedKind = kind,
+                IsMuted = isMuted,
+                ContactHash = ShortHash(sessionKey),
+                RawLineCount = lines.Count,
+                HasServiceLabel = hasServiceLabel,
+                HasOfficialLabel = hasOfficialLabel,
+                HasMutedLabel = isMuted,
+                HasGroupMarker = hasGroupMarker,
                 // Timestamp text is presentation state: "刚刚" later becomes
                 // a clock time even though the message itself did not change.
-                Signature = Hash(contact + "\n" + preview)
+                Signature = Hash(sessionKey + "\n" + preview)
             };
+        }
+
+        private static ChatSessionKind Classify(
+            bool hasServiceLabel,
+            bool hasOfficialLabel,
+            bool isMuted,
+            bool hasGroupMarker)
+        {
+            if (hasServiceLabel)
+            {
+                return ChatSessionKind.ServiceAccount;
+            }
+            if (hasOfficialLabel)
+            {
+                return ChatSessionKind.OfficialAccount;
+            }
+
+            if (hasGroupMarker)
+            {
+                return isMuted
+                    ? ChatSessionKind.MutedGroupChat
+                    : ChatSessionKind.GroupChat;
+            }
+
+            // WeChat 4.x often exposes only "session_item_<display name>".
+            // That does not prove a row is a direct contact: it can also be a
+            // group or account. Unknown is safer and can be manually overridden.
+            return ChatSessionKind.Unknown;
+        }
+
+        private static bool ContainsExactLine(
+            IEnumerable<string> lines,
+            string expected)
+        {
+            return lines.Any(
+                delegate(string line)
+                {
+                    return string.Equals(
+                        line,
+                        expected,
+                        StringComparison.Ordinal);
+                });
         }
 
         internal static bool IsRecentTimestamp(string value, DateTime now)
@@ -172,9 +249,83 @@ namespace WeChatMessageNotifier
                 return false;
             }
 
-            return preview.StartsWith("我:", StringComparison.Ordinal) ||
-                   preview.StartsWith("我：", StringComparison.Ordinal) ||
-                   preview.StartsWith("You:", StringComparison.OrdinalIgnoreCase);
+            var value = preview.TrimStart();
+            if (StartsWithColonPrefix(value, "You"))
+            {
+                return true;
+            }
+
+            // "你:" is intentionally not treated as outgoing without UIA
+            // evidence. Some WeChat builds can expose incoming preview text
+            // starting with 你, so filtering it here risks losing real messages.
+            return StartsWithOutgoingActor(value, '\u6211');
+        }
+
+        private static bool StartsWithColonPrefix(
+            string value,
+            string prefix)
+        {
+            if (!value.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            var remainder = value.Substring(prefix.Length).TrimStart();
+            return remainder.StartsWith(":", StringComparison.Ordinal) ||
+                   remainder.StartsWith("\uFF1A", StringComparison.Ordinal);
+        }
+
+        private static bool StartsWithOutgoingActor(
+            string value,
+            char actor)
+        {
+            if (value.Length == 0 || value[0] != actor)
+            {
+                return false;
+            }
+
+            var remainder = value.Substring(1);
+            var hadSeparator = remainder.Length > 0 &&
+                char.IsWhiteSpace(remainder[0]);
+            remainder = remainder.TrimStart();
+            if (remainder.StartsWith(":", StringComparison.Ordinal) ||
+                remainder.StartsWith("\uFF1A", StringComparison.Ordinal))
+            {
+                return true;
+            }
+
+            // Attachment and call summaries use a fixed actor token followed
+            // by a space. Requiring that separator prevents names such as
+            // "你好吗" or "我爱学习" from being treated as outgoing.
+            if (!hadSeparator)
+            {
+                return false;
+            }
+
+            var fixedSummaries = new[]
+            {
+                "[\u56FE\u7247]",
+                "[\u6587\u4EF6]",
+                "[\u8BED\u97F3]",
+                "[\u89C6\u9891]",
+                "[\u52A8\u753B\u8868\u60C5]",
+                "[\u8868\u60C5]",
+                "[\u4F4D\u7F6E]",
+                "[\u94FE\u63A5]",
+                "[\u97F3\u4E50]",
+                "[\u5C0F\u7A0B\u5E8F]",
+                "\u53D1\u8D77\u4E86\u8BED\u97F3\u901A\u8BDD",
+                "\u53D1\u8D77\u4E86\u89C6\u9891\u901A\u8BDD"
+            };
+            foreach (var summary in fixedSummaries)
+            {
+                if (remainder.StartsWith(summary, StringComparison.Ordinal))
+                {
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         private static bool IsTimestamp(string value)
@@ -193,6 +344,20 @@ namespace WeChatMessageNotifier
             {
                 var bytes = sha.ComputeHash(Encoding.UTF8.GetBytes(value));
                 return Convert.ToBase64String(bytes);
+            }
+        }
+
+        private static string ShortHash(string value)
+        {
+            using (var sha = SHA256.Create())
+            {
+                var bytes = sha.ComputeHash(Encoding.UTF8.GetBytes(value));
+                var builder = new StringBuilder(8);
+                for (var index = 0; index < 4; index++)
+                {
+                    builder.Append(bytes[index].ToString("x2"));
+                }
+                return builder.ToString();
             }
         }
     }

@@ -16,6 +16,7 @@ $windowsFoundation = Join-Path $env:WINDIR 'System32\WinMetadata\Windows.Foundat
 $windowsRuntime = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\System.Runtime.WindowsRuntime.dll'
 $systemRuntime = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\System.Runtime.dll'
 $windowsRuntimeInterop = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\System.Runtime.InteropServices.WindowsRuntime.dll'
+$manifest = Join-Path $sourceDirectory 'app.manifest'
 $sources = Get-ChildItem -LiteralPath $sourceDirectory -Filter '*.cs' | Select-Object -ExpandProperty FullName
 
 New-Item -ItemType Directory -Force -Path $outputDirectory | Out-Null
@@ -25,6 +26,7 @@ New-Item -ItemType Directory -Force -Path $outputDirectory | Out-Null
     /target:winexe `
     /platform:anycpu `
     /optimize+ `
+    /win32manifest:$manifest `
     /out:$output `
     /reference:System.dll `
     /reference:System.Core.dll `

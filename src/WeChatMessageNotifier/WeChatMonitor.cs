@@ -17,6 +17,8 @@ namespace WeChatMessageNotifier
         // local click to the matched visible chat row for navigation.
         private readonly Logger logger;
         private readonly SessionChangeDetector detector = new SessionChangeDetector();
+        private readonly Dictionary<ChatSessionKind, int> lastKindCounts =
+            new Dictionary<ChatSessionKind, int>();
         private IntPtr mainWindow;
         private DateTime lastWindowSearch = DateTime.MinValue;
 
@@ -31,6 +33,18 @@ namespace WeChatMessageNotifier
         }
 
         internal int LastSessionCount { get; private set; }
+
+        internal int LastSelectedSessionCount { get; private set; }
+
+        internal int LastMutedSessionCount { get; private set; }
+
+        internal int LastGroupMarkerCount { get; private set; }
+
+        internal int GetLastSessionKindCount(ChatSessionKind kind)
+        {
+            int count;
+            return lastKindCounts.TryGetValue(kind, out count) ? count : 0;
+        }
 
         internal bool IsWeChatForeground()
         {
@@ -90,12 +104,55 @@ namespace WeChatMessageNotifier
                     var session = SessionParser.Parse(name, index, automationId);
                     if (session != null)
                     {
+                        object selectionPattern;
+                        if (rawItems[index].TryGetCurrentPattern(
+                            SelectionItemPattern.Pattern,
+                            out selectionPattern))
+                        {
+                            try
+                            {
+                                session.IsSelected =
+                                    ((SelectionItemPattern)selectionPattern)
+                                    .Current.IsSelected;
+                            }
+                            catch (ElementNotAvailableException)
+                            {
+                                session.IsSelected = false;
+                            }
+                        }
                         sessions.Add(session);
                     }
                 }
 
                 LastSessionCount = sessions.Count;
-                return detector.Update(sessions, DateTime.Now);
+                LastSelectedSessionCount = sessions.Count(
+                    delegate(ChatSession session) { return session.IsSelected; });
+                LastMutedSessionCount = sessions.Count(
+                    delegate(ChatSession session) { return session.IsMuted; });
+                LastGroupMarkerCount = sessions.Count(
+                    delegate(ChatSession session)
+                    {
+                        return session.HasGroupMarker;
+                    });
+                lastKindCounts.Clear();
+                foreach (var session in sessions)
+                {
+                    int count;
+                    lastKindCounts.TryGetValue(session.Kind, out count);
+                    lastKindCounts[session.Kind] = count + 1;
+                }
+                var changes = detector.Update(
+                    sessions,
+                    DateTime.Now,
+                    IsWeChatForeground());
+                if (detector.LastOutgoingSuppressedCount > 0)
+                {
+                    logger.Info(
+                        "Suppressed " +
+                        detector.LastOutgoingSuppressedCount +
+                        " outgoing message change(s).");
+                }
+                return changes;
             }
             catch (ElementNotAvailableException)
             {
@@ -115,7 +172,7 @@ namespace WeChatMessageNotifier
             ActivateWeChat(null);
         }
 
-        internal void ActivateWeChat(string contact)
+        internal void ActivateWeChat(string sessionKey)
         {
             if (!EnsureMainWindow())
             {
@@ -138,7 +195,7 @@ namespace WeChatMessageNotifier
             }
             NativeMethods.SetForegroundWindow(mainWindow);
 
-            if (string.IsNullOrWhiteSpace(contact))
+            if (string.IsNullOrWhiteSpace(sessionKey))
             {
                 return;
             }
@@ -168,8 +225,8 @@ namespace WeChatMessageNotifier
                     var session = SessionParser.Parse(name, 0, automationId);
                     if (session == null ||
                         !string.Equals(
-                            session.Contact,
-                            contact,
+                            session.SessionKey,
+                            sessionKey,
                             StringComparison.Ordinal))
                     {
                         continue;

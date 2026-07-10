@@ -6,11 +6,22 @@ namespace WeChatMessageNotifier
     // Parsed, in-memory representation of a single visible WeChat session row.
     internal sealed class ChatSession
     {
+        internal string SessionKey { get; set; }
         internal string Contact { get; set; }
         internal string Preview { get; set; }
         internal string Timestamp { get; set; }
         internal string Signature { get; set; }
         internal int UnreadCount { get; set; }
         internal int Position { get; set; }
+        internal bool IsSelected { get; set; }
+        internal ChatSessionKind Kind { get; set; }
+        internal ChatSessionKind DetectedKind { get; set; }
+        internal bool IsMuted { get; set; }
+        internal string ContactHash { get; set; }
+        internal int RawLineCount { get; set; }
+        internal bool HasServiceLabel { get; set; }
+        internal bool HasOfficialLabel { get; set; }
+        internal bool HasMutedLabel { get; set; }
+        internal bool HasGroupMarker { get; set; }
     }
 }

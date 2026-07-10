@@ -28,8 +28,12 @@ namespace WeChatMessageNotifier
         private const int DwmwaWindowCornerPreference = 33;
         private const int DwmwaSystemBackdropType = 38;
         private const int DwmwaCloaked = 14;
+        private const int DwmwaBorderColor = 34;
         private const int DwmwcpRound = 2;
+        private const int DwmsbtMainWindow = 2;
         private const int DwmsbtTransientWindow = 3;
+        private const int DwmsbtTabbedWindow = 4;
+        private const int WcaAccentPolicy = 19;
         private const uint WmLeftButtonDown = 0x0201;
         private const uint WmLeftButtonUp = 0x0202;
         private static readonly IntPtr MkLeftButton = new IntPtr(0x0001);
@@ -110,31 +114,213 @@ namespace WeChatMessageNotifier
             out int value,
             int valueSize);
 
+        [DllImport("dwmapi.dll")]
+        private static extern int DwmExtendFrameIntoClientArea(
+            IntPtr hWnd,
+            ref Margins margins);
+
+        [DllImport("user32.dll")]
+        private static extern int SetWindowCompositionAttribute(
+            IntPtr hWnd,
+            ref WindowCompositionAttributeData data);
+
+        internal static bool LastExtendFrameApplied { get; private set; }
+
         internal static void ApplyWindows11PopupStyle(IntPtr hWnd)
         {
+            TryApplyWindows11Backdrop(hWnd, PopupBackdropKind.Acrylic);
+        }
+
+        internal static bool TryApplyWindows11Backdrop(
+            IntPtr hWnd,
+            PopupBackdropKind kind)
+        {
             // These calls are best-effort. Older Windows versions simply
-            // ignore unsupported attributes and keep the opacity fallback.
+            // ignore unsupported attributes and keep the solid fallback.
+            if (hWnd == IntPtr.Zero)
+            {
+                LastExtendFrameApplied = false;
+                return false;
+            }
+
             try
             {
+                if (kind == PopupBackdropKind.None)
+                {
+                    LastExtendFrameApplied = false;
+                    var noBackdrop = 0;
+                    DwmSetWindowAttribute(
+                        hWnd,
+                        DwmwaSystemBackdropType,
+                        ref noBackdrop,
+                        sizeof(int));
+                    return false;
+                }
+
                 var cornerPreference = DwmwcpRound;
-                DwmSetWindowAttribute(
+                var cornerResult = DwmSetWindowAttribute(
                     hWnd,
                     DwmwaWindowCornerPreference,
                     ref cornerPreference,
                     sizeof(int));
 
-                var backdropType = DwmsbtTransientWindow;
-                DwmSetWindowAttribute(
+                var backdropType = ToDwmBackdropType(kind);
+                var backdropResult = DwmSetWindowAttribute(
                     hWnd,
                     DwmwaSystemBackdropType,
                     ref backdropType,
                     sizeof(int));
+
+                // Remove DWM's default border when supported; Region already
+                // clips the popup and a dark border looks wrong on acrylic.
+                var borderColorNone = unchecked((int)0xFFFFFFFE);
+                DwmSetWindowAttribute(
+                    hWnd,
+                    DwmwaBorderColor,
+                    ref borderColorNone,
+                    sizeof(int));
+
+                // Do not extend the DWM frame through the whole client area
+                // by default. On borderless WinForms windows this can make
+                // GDI/TextRenderer output participate in the glass composite,
+                // which is exactly what made the notification text look
+                // white and translucent. We keep the API available but leave
+                // the normal popup text path isolated from this glass route.
+                LastExtendFrameApplied = false;
+                return cornerResult == 0 && backdropResult == 0;
             }
             catch (DllNotFoundException)
             {
+                LastExtendFrameApplied = false;
+                return false;
             }
             catch (EntryPointNotFoundException)
             {
+                LastExtendFrameApplied = false;
+                return false;
+            }
+            catch
+            {
+                LastExtendFrameApplied = false;
+                return false;
+            }
+        }
+
+        internal static bool TryApplyAccentAcrylicBackdrop(
+            IntPtr hWnd,
+            Color tint)
+        {
+            // Best-effort fallback for borderless WinForms windows where
+            // DWMWA_SYSTEMBACKDROP_TYPE is accepted but not visually obvious.
+            // The popup remains an ordinary opaque top-level window; text is
+            // painted later by child controls and is not drawn into a layered
+            // bitmap, so ClearType remains sharp.
+            if (hWnd == IntPtr.Zero)
+            {
+                return false;
+            }
+
+            try
+            {
+                var policy = new AccentPolicy
+                {
+                    AccentState = AccentState.EnableAcrylicBlurBehind,
+                    AccentFlags = 2,
+                    GradientColor = ToAbgr(tint),
+                    AnimationId = 0
+                };
+                var policySize = Marshal.SizeOf(typeof(AccentPolicy));
+                var policyPointer = Marshal.AllocHGlobal(policySize);
+                try
+                {
+                    Marshal.StructureToPtr(policy, policyPointer, false);
+                    var data = new WindowCompositionAttributeData
+                    {
+                        Attribute = WcaAccentPolicy,
+                        Data = policyPointer,
+                        SizeOfData = policySize
+                    };
+                    return SetWindowCompositionAttribute(hWnd, ref data) != 0;
+                }
+                finally
+                {
+                    Marshal.FreeHGlobal(policyPointer);
+                }
+            }
+            catch (DllNotFoundException)
+            {
+                return false;
+            }
+            catch (EntryPointNotFoundException)
+            {
+                return false;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        internal static bool TryDisableAccentBackdrop(IntPtr hWnd)
+        {
+            if (hWnd == IntPtr.Zero)
+            {
+                return false;
+            }
+
+            try
+            {
+                var policy = new AccentPolicy
+                {
+                    AccentState = AccentState.Disabled
+                };
+                var policySize = Marshal.SizeOf(typeof(AccentPolicy));
+                var policyPointer = Marshal.AllocHGlobal(policySize);
+                try
+                {
+                    Marshal.StructureToPtr(policy, policyPointer, false);
+                    var data = new WindowCompositionAttributeData
+                    {
+                        Attribute = WcaAccentPolicy,
+                        Data = policyPointer,
+                        SizeOfData = policySize
+                    };
+                    return SetWindowCompositionAttribute(hWnd, ref data) != 0;
+                }
+                finally
+                {
+                    Marshal.FreeHGlobal(policyPointer);
+                }
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static int ToAbgr(Color color)
+        {
+            unchecked
+            {
+                return (int)((uint)color.A << 24 |
+                             (uint)color.B << 16 |
+                             (uint)color.G << 8 |
+                             color.R);
+            }
+        }
+
+        private static int ToDwmBackdropType(PopupBackdropKind kind)
+        {
+            switch (kind)
+            {
+                case PopupBackdropKind.Mica:
+                    return DwmsbtMainWindow;
+                case PopupBackdropKind.MicaAlt:
+                    return DwmsbtTabbedWindow;
+                case PopupBackdropKind.Acrylic:
+                    return DwmsbtTransientWindow;
+                default:
+                    return 0;
             }
         }
 
@@ -281,6 +467,41 @@ namespace WeChatMessageNotifier
         {
             internal int X;
             internal int Y;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct Margins
+        {
+            internal int Left;
+            internal int Right;
+            internal int Top;
+            internal int Bottom;
+        }
+
+        private enum AccentState
+        {
+            Disabled = 0,
+            EnableGradient = 1,
+            EnableTransparentGradient = 2,
+            EnableBlurBehind = 3,
+            EnableAcrylicBlurBehind = 4
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct AccentPolicy
+        {
+            internal AccentState AccentState;
+            internal int AccentFlags;
+            internal int GradientColor;
+            internal int AnimationId;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct WindowCompositionAttributeData
+        {
+            internal int Attribute;
+            internal IntPtr Data;
+            internal int SizeOfData;
         }
     }
 }
