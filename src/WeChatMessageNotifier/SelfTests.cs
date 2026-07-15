@@ -1796,6 +1796,23 @@ namespace WeChatMessageNotifier
                         "Different sessions did not keep separate toast states.",
                         failures);
 
+                    notificationCenter.ClearSession("session-a");
+                    Expect(
+                        notificationCenter.GetMessageCountForTest("session-a") == 0 &&
+                        notificationCenter.GetTagForTest("session-a") == null &&
+                        notificationCenter.ActiveSessionCountForTest == 1,
+                        "Successful session activation did not clear its toast state.",
+                        failures);
+                    Expect(
+                        notificationCenter.ShowMessage(
+                            "session-a",
+                            "contact-a",
+                            "new-message-after-activation",
+                            false,
+                            false) == 1,
+                        "A message after activation did not restart at one.",
+                        failures);
+
                     notificationCenter.ShowMessage(
                         "session-private",
                         "联系人丙",

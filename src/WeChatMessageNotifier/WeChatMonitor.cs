@@ -23,6 +23,13 @@ namespace WeChatMessageNotifier
             new Dictionary<ChatSessionKind, int>();
         private readonly Dictionary<string, SessionNavigationInfo> navigationCatalog =
             new Dictionary<string, SessionNavigationInfo>(StringComparer.Ordinal);
+        // The crossed-bell is exposed as a descendant UIA element rather than
+        // text on the row. Walking every descendant is comparatively costly,
+        // so retain the visual result briefly between normal session polls.
+        private readonly Dictionary<string, MutedMarkerCacheEntry> mutedMarkerCache =
+            new Dictionary<string, MutedMarkerCacheEntry>(StringComparer.Ordinal);
+        private static readonly TimeSpan MutedMarkerCacheLifetime =
+            TimeSpan.FromSeconds(8);
         private IntPtr mainWindow;
         private DateTime lastWindowSearch = DateTime.MinValue;
 
@@ -95,6 +102,9 @@ namespace WeChatMessageNotifier
                 }
 
                 var rawItems = FindSessionItems(root);
+                // DeterminePageKind performs additional UIA queries. It must
+                // be evaluated once per poll, not once for every chat row.
+                var sourcePageKind = DeterminePageKind(root, rawItems.Count);
                 var sessions = new List<ChatSession>();
                 for (var index = 0; index < rawItems.Count; index++)
                 {
@@ -110,20 +120,29 @@ namespace WeChatMessageNotifier
                         continue;
                     }
 
-                    var hasMutedVisualMarker = HasMutedVisualMarker(rawItems[index]);
                     var session = SessionParser.Parse(
                         name,
                         index,
-                        automationId,
-                        hasMutedVisualMarker);
+                        automationId);
                     if (session != null)
                     {
+                        // Only group candidates can be a muted group. This
+                        // avoids recursive UIA icon scans for ordinary chats.
+                        if (session.HasGroupMarker && GetMutedVisualMarker(
+                            rawItems[index], session.SessionKey, DateTime.UtcNow))
+                        {
+                            session = SessionParser.Parse(
+                                name,
+                                index,
+                                automationId,
+                                true);
+                        }
                         navigationCatalog[session.SessionKey] =
                             new SessionNavigationInfo
                             {
                                 SessionKey = session.SessionKey,
                                 DetectedKind = session.DetectedKind,
-                                SourcePageKind = DeterminePageKind(root),
+                                SourcePageKind = sourcePageKind,
                                 LastSeenTime = DateTime.Now
                             };
                         object selectionPattern;
@@ -189,23 +208,23 @@ namespace WeChatMessageNotifier
             }
         }
 
-        internal void ActivateWeChat()
+        internal bool ActivateWeChat()
         {
-            ActivateWeChat((string)null);
+            return ActivateWeChat((string)null);
         }
 
-        internal void ActivateWeChat(string sessionKey)
+        internal bool ActivateWeChat(string sessionKey)
         {
-            ActivateWeChat(ToastActivationRequest.FromSession(
+            return ActivateWeChat(ToastActivationRequest.FromSession(
                 sessionKey,
                 ChatSessionKind.Unknown));
         }
 
-        internal void ActivateWeChat(ToastActivationRequest request)
+        internal bool ActivateWeChat(ToastActivationRequest request)
         {
             if (!EnsureMainWindow())
             {
-                return;
+                return false;
             }
 
             // Do not call SW_RESTORE on a maximized window: doing so would
@@ -226,7 +245,7 @@ namespace WeChatMessageNotifier
 
             if (request == null || string.IsNullOrWhiteSpace(request.SessionKey))
             {
-                return;
+                return true;
             }
 
             try
@@ -234,7 +253,7 @@ namespace WeChatMessageNotifier
                 var root = AutomationElement.FromHandle(mainWindow);
                 if (root == null)
                 {
-                    return;
+                    return false;
                 }
                 var route = request.Route;
                 SessionNavigationInfo known;
@@ -250,10 +269,12 @@ namespace WeChatMessageNotifier
                 logger.Info("ActivationResult=" +
                     (success ? "SelectedInMainShell" : "TargetNotFound") +
                     " Route=" + route);
+                return success;
             }
             catch (Exception exception)
             {
                 logger.Error("Could not activate target WeChat session", exception);
+                return false;
             }
         }
 
@@ -589,6 +610,33 @@ namespace WeChatMessageNotifier
             return false;
         }
 
+        private bool GetMutedVisualMarker(
+            AutomationElement sessionItem,
+            string sessionKey,
+            DateTime now)
+        {
+            MutedMarkerCacheEntry cached;
+            if (mutedMarkerCache.TryGetValue(sessionKey, out cached) &&
+                now - cached.CheckedAtUtc < MutedMarkerCacheLifetime)
+            {
+                return cached.HasMutedVisualMarker;
+            }
+
+            var hasMutedVisualMarker = HasMutedVisualMarker(sessionItem);
+            mutedMarkerCache[sessionKey] = new MutedMarkerCacheEntry
+            {
+                CheckedAtUtc = now,
+                HasMutedVisualMarker = hasMutedVisualMarker
+            };
+            return hasMutedVisualMarker;
+        }
+
+        private sealed class MutedMarkerCacheEntry
+        {
+            internal DateTime CheckedAtUtc { get; set; }
+            internal bool HasMutedVisualMarker { get; set; }
+        }
+
         private static bool LooksLikeMutedVisualMetadata(
             string automationId,
             string name,
@@ -660,20 +708,26 @@ namespace WeChatMessageNotifier
 
         private static WeChatPageKind DeterminePageKind(AutomationElement root)
         {
-            var sessionItems = FindSessionItems(root);
+            return DeterminePageKind(root, FindSessionItems(root).Count);
+        }
+
+        private static WeChatPageKind DeterminePageKind(
+            AutomationElement root,
+            int sessionItemCount)
+        {
             var hasBack = FindBackButton(root) != null;
             var hasService = ContainsStableLabel(root, "服务号", "Service Accounts");
             if (hasService && hasBack)
             {
-                return sessionItems.Count > 0
+                return sessionItemCount > 0
                     ? WeChatPageKind.ServiceAccountList
                     : WeChatPageKind.ServiceAccountDetail;
             }
-            if (hasBack && sessionItems.Count == 0)
+            if (hasBack && sessionItemCount == 0)
             {
                 return WeChatPageKind.Conversation;
             }
-            return sessionItems.Count > 0
+            return sessionItemCount > 0
                 ? WeChatPageKind.MainSessions
                 : WeChatPageKind.Unknown;
         }

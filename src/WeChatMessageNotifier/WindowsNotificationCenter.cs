@@ -173,6 +173,46 @@ namespace WeChatMessageNotifier
                 : null;
         }
 
+        // A successful toast activation means the user is now viewing this
+        // conversation in WeChat. Clear both the in-memory aggregation state
+        // and the matching Notification Center history entry, so the next
+        // incoming message starts again at one rather than inheriting stale
+        // unread-count text.
+        internal void ClearSession(string sessionKey)
+        {
+            if (string.IsNullOrWhiteSpace(sessionKey))
+            {
+                return;
+            }
+
+            NotificationState state;
+            if (!states.TryGetValue(sessionKey, out state))
+            {
+                return;
+            }
+
+            states.Remove(sessionKey);
+            RemoveTrackedToast(state.Tag);
+            if (emitNativeToast && available && !disposed)
+            {
+                try
+                {
+                    ToastNotificationManager.History.Remove(
+                        state.Tag,
+                        "wechat",
+                        AppUserModelId);
+                }
+                catch (Exception exception)
+                {
+                    // History removal is best-effort. The in-memory state is
+                    // already reset, so a transient WinRT failure must not
+                    // block future notifications for this conversation.
+                    logger.Error("Could not remove notification center entry", exception);
+                }
+            }
+            logger.Info("Notification state cleared after successful activation.");
+        }
+
         internal int ActiveSessionCountForTest
         {
             get { return states.Count; }
@@ -604,6 +644,21 @@ namespace WeChatMessageNotifier
         {
             tracked.Detach();
             activeToasts.Remove(tracked);
+        }
+
+        private void RemoveTrackedToast(string tag)
+        {
+            for (var index = activeToasts.Count - 1; index >= 0; index--)
+            {
+                var toast = activeToasts[index].Toast;
+                if (toast != null && string.Equals(
+                    toast.Tag,
+                    tag,
+                    StringComparison.Ordinal))
+                {
+                    ReleaseTracked(activeToasts[index]);
+                }
+            }
         }
 
         private void ClearTrackedToasts()

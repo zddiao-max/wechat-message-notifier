@@ -50,7 +50,7 @@ namespace WeChatMessageNotifier
             settingsStore.Save(notificationFilters);
             monitor = new WeChatMonitor(logger);
             notificationCenter = new WindowsNotificationCenter(
-                delegate(ToastActivationRequest request) { monitor.ActivateWeChat(request); },
+                HandleToastActivation,
                 logger);
             pendingActivationRequest =
                 Program.ExtractToastActivationRequest(args) ??
@@ -213,7 +213,7 @@ namespace WeChatMessageNotifier
                         Program.ReadActivationPayload() ??
                         pendingActivationRequest;
                     pendingActivationRequest = null;
-                    monitor.ActivateWeChat(request);
+                    HandleToastActivation(request);
                 }
             };
             activationTimer.Start();
@@ -289,6 +289,23 @@ namespace WeChatMessageNotifier
                     "Notification shown. ContactLength=" + session.Contact.Length +
                     " PreviewLength=" + session.Preview.Length +
                     " ContactMessageCount=" + contactMessageCount);
+            }
+        }
+
+        private void HandleToastActivation(ToastActivationRequest request)
+        {
+            if (request == null || string.IsNullOrWhiteSpace(request.SessionKey))
+            {
+                monitor.ActivateWeChat(request);
+                return;
+            }
+
+            // Clear only after UIA confirms that WeChat selected the intended
+            // conversation. Failed navigation must leave the notification in
+            // place rather than making unread messages disappear.
+            if (monitor.ActivateWeChat(request))
+            {
+                notificationCenter.ClearSession(request.SessionKey);
             }
         }
 

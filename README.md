@@ -2,7 +2,9 @@
 
 一个适用于 Windows 微信 4.x 的本地开源消息提醒器。
 
-当前版本：**2.5.0**
+当前版本：**2.5.1**
+
+> v2.5.1 已从运行路径删除旧的自定义弹窗、动画、毛玻璃和系统面板避让功能；程序只使用 Windows 系统横幅与通知中心。为降低清理风险，旧弹窗源码暂时保留在仓库中，不会被实例化或运行，后续会单独删除。
 
 微信有新消息时，程序从微信公开的 Windows UI Automation 会话列表中读取联系人、消息摘要和时间，并默认使用 Windows 系统通知横幅提醒；通知会进入 Windows 通知中心。点击通知可打开微信，并尽量跳转到对应会话。
 
@@ -79,9 +81,9 @@
 }
 ```
 
-`notificationDisplayMode` 可设为 `WindowsToast` 或 `CustomPopup`，也可通过托盘“提醒方式”菜单切换。默认 `WindowsToast` 使用系统通知横幅；`CustomPopup` 才启用自定义弹窗。
+`notificationDisplayMode` 在 v2.5.1 固定为 `WindowsToast`。旧的 `CustomPopup` 设置会在启动时自动迁移为 Windows 系统通知；托盘不再提供自定义弹窗切换。
 
-`motionMode` 可设为 `Standard`、`Reduced` 或 `Off`，也可直接通过托盘“动画效果”菜单切换。标准模式包含轻微缩放反馈；减弱模式仅保留淡入淡出和短距离移动；关闭模式直接完成显示、关闭和布局。
+`motionMode` 和 `popupVisualMode` 是旧自定义弹窗遗留设置；v2.5.1 运行时不再使用它们。系统横幅的显示效果和停留时长由 Windows 通知设置统一控制。
 
 卡片透明度使用单调 ease-out，位置和重排使用分别调校的阻尼弹簧；标准模式下卡片重排单帧位移限制为 14px，避免联系人增多时瞬间跳位。
 

@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.5.1 - 2026-07-15
+
+- Removed the legacy custom-popup, animation, glass, and system-panel-avoidance paths from the running application. Windows system notifications are now the only delivery path.
+- The tray menu no longer exposes custom-popup display, motion, or visual-effect controls. Legacy source files remain temporarily for a later, isolated cleanup after the Windows-toast workflow has been stable in daily use.
+- Clear a session's aggregated notification count and matching Windows Notification Center history only after WeChat UI Automation confirms that the intended conversation was selected. The next message starts again at one.
+- Reduced tray-menu stalls by calculating the WeChat page kind once per polling pass and caching crossed-bell UIA checks for group candidates.
+- Improved best-effort muted-group recognition for WeChat 4.x crossed-bell session-row markers.
+
 ## 2.5.0 - 2026-07-10
 
 - 默认提醒方式改为 Windows 系统通知横幅：新微信消息直接使用系统 toast 弹出并进入 Windows 通知中心，通知样式、动画、圆角、阴影和毛玻璃交由 Windows 11 处理。
