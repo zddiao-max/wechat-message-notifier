@@ -114,12 +114,25 @@ namespace WeChatMessageNotifier
             if (!Controls.Contains(card))
             {
                 Controls.Add(card);
+                UpdateClipRegion();
+                Invalidate();
             }
         }
 
         internal void RemoveCard(PopupCardControl card)
         {
             Controls.Remove(card);
+            UpdateClipRegion();
+            Invalidate();
+        }
+
+        // Called only after add/remove/reflow, never from the 60 FPS frame
+        // loop. That keeps the union Region accurate without per-frame GDI
+        // Region churn.
+        internal void RefreshCardGeometry()
+        {
+            UpdateClipRegion();
+            Invalidate();
         }
 
         internal void UpdateDpiScale(float dpiScale)
@@ -271,7 +284,49 @@ namespace WeChatMessageNotifier
 
         protected override void OnPaintBackground(PaintEventArgs eventArgs)
         {
-            base.OnPaintBackground(eventArgs);
+            if (effectiveVisualMode == PopupVisualMode.Solid)
+            {
+                base.OnPaintBackground(eventArgs);
+            }
+            // DWM owns the Glass client background; painting a WinForms solid
+            // host here would cover it before the single host composition pass.
+        }
+
+        protected override void OnPaint(PaintEventArgs eventArgs)
+        {
+            base.OnPaint(eventArgs);
+            if (effectiveVisualMode != PopupVisualMode.Glass)
+            {
+                return;
+            }
+
+            eventArgs.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            foreach (Control control in Controls)
+            {
+                var card = control as PopupCardControl;
+                if (card == null || !card.Visible)
+                {
+                    continue;
+                }
+                var opacity = Math.Max(0, Math.Min(1, card.VisualOpacity));
+                var alpha = Math.Max(218, (int)Math.Round(238 * opacity));
+                using (var path = CreateRoundedPath(card.Bounds, metrics.CornerRadius))
+                using (var tint = new SolidBrush(Color.FromArgb(alpha, 248, 251, 254)))
+                using (var accent = new SolidBrush(Color.FromArgb(255, 7, 193, 96)))
+                using (var border = new Pen(Color.FromArgb(170, 218, 226, 235)))
+                {
+                    eventArgs.Graphics.FillPath(tint, path);
+                    eventArgs.Graphics.SetClip(path);
+                    eventArgs.Graphics.FillRectangle(
+                        accent,
+                        card.Left,
+                        card.Top,
+                        metrics.AccentWidth,
+                        card.Height);
+                    eventArgs.Graphics.ResetClip();
+                    eventArgs.Graphics.DrawPath(border, path);
+                }
+            }
         }
 
         protected override void WndProc(ref Message message)
@@ -297,9 +352,7 @@ namespace WeChatMessageNotifier
             }
 
             var oldRegion = Region;
-            using (var path = CreateRoundedPath(
-                new Rectangle(0, 0, Width, Height),
-                metrics.CornerRadius))
+            using (var path = CreateCardUnionPath())
             {
                 Region = new Region(path);
             }
@@ -307,6 +360,28 @@ namespace WeChatMessageNotifier
             {
                 oldRegion.Dispose();
             }
+        }
+
+        private GraphicsPath CreateCardUnionPath()
+        {
+            var result = new GraphicsPath();
+            if (Controls.Count == 0)
+            {
+                result.AddPath(CreateRoundedPath(new Rectangle(0, 0, Width, Height), metrics.CornerRadius), false);
+                return result;
+            }
+            foreach (Control control in Controls)
+            {
+                if (!control.Visible)
+                {
+                    continue;
+                }
+                using (var cardPath = CreateRoundedPath(control.Bounds, metrics.CornerRadius))
+                {
+                    result.AddPath(cardPath, false);
+                }
+            }
+            return result;
         }
 
         private void ApplyVisualMode()

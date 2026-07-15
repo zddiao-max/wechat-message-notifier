@@ -21,7 +21,9 @@ namespace WeChatMessageNotifier
         internal int RawLineCount { get; set; }
         internal bool HasServiceLabel { get; set; }
         internal bool HasOfficialLabel { get; set; }
+        internal bool HasOfficialMarker { get; set; }
         internal bool HasMutedLabel { get; set; }
+        internal bool HasMutedVisualMarker { get; set; }
         internal bool HasGroupMarker { get; set; }
     }
 }

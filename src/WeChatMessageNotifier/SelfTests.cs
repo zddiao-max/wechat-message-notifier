@@ -36,6 +36,8 @@ namespace WeChatMessageNotifier
             TestDpiScaling(failures);
             TestPopupVisualModes(failures);
             TestWindowsToastDisplayMode(failures);
+            TestToastActivationRequest(failures);
+            TestPanelAvoidanceState(failures);
             TestNotificationFilterSettings(failures);
             TestSettingsStore(failures);
             TestLogRotation(failures);
@@ -142,8 +144,18 @@ namespace WeChatMessageNotifier
                 "session_item_gh_official");
             Expect(
                 official.Kind == ChatSessionKind.OfficialAccount &&
-                official.HasOfficialLabel,
+                official.HasOfficialMarker,
                 "Official account label was not classified.",
+                failures);
+
+            var officialById = SessionParser.Parse(
+                "帐号名称\n消息\n10:00",
+                0,
+                "session_item_gh_1234567890abcdef");
+            Expect(
+                officialById.Kind == ChatSessionKind.OfficialAccount &&
+                officialById.HasOfficialMarker,
+                "Stable gh_ identity was not classified as an official account.",
                 failures);
 
             var group = SessionParser.Parse(
@@ -165,6 +177,16 @@ namespace WeChatMessageNotifier
                 "Muted chatroom was not classified.",
                 failures);
 
+            var mutedGroupByShortLabel = SessionParser.Parse(
+                "项目讨论\n消息\n10:00\n静音",
+                0,
+                "session_item_team@chatroom");
+            Expect(
+                mutedGroupByShortLabel.Kind == ChatSessionKind.MutedGroupChat &&
+                mutedGroupByShortLabel.IsMuted,
+                "Short muted label did not classify a confirmed group as muted.",
+                failures);
+
             var mutedDirect = SessionParser.Parse(
                 "普通联系人\n消息\n10:00\n消息免打扰",
                 0,
@@ -175,12 +197,44 @@ namespace WeChatMessageNotifier
                 "Muted direct contact was misclassified as a muted group.",
                 failures);
 
+            var mutedGroupByVisualMarker = SessionParser.Parse(
+                "\u91D1\u6D77\u6E7E\u7B2C\u4E03\u7F51\u683C\u7FA4(345)\n\u6D88\u606F\n10:00",
+                0,
+                "session_item_unlabeled_group",
+                true);
+            Expect(
+                mutedGroupByVisualMarker.Kind == ChatSessionKind.MutedGroupChat &&
+                mutedGroupByVisualMarker.IsMuted &&
+                mutedGroupByVisualMarker.HasMutedVisualMarker,
+                "Crossed-bell visual marker plus group member count was not classified as a muted group.",
+                failures);
+
+            var mutedNameWithoutMemberCount = SessionParser.Parse(
+                "\u9879\u76EE\u7FA4\n\u6D88\u606F\n10:00",
+                0,
+                "session_item_unlabeled",
+                true);
+            Expect(
+                mutedNameWithoutMemberCount.Kind == ChatSessionKind.Unknown &&
+                mutedNameWithoutMemberCount.IsMuted,
+                "A mute icon alone incorrectly inferred a group from its name.",
+                failures);
+
             var unknown = SessionParser.Parse(
                 "无法确认\n消息\n10:00",
                 0);
             Expect(
                 unknown.Kind == ChatSessionKind.Unknown,
                 "Session without stable classification evidence was not Unknown.",
+                failures);
+
+            var nameOnlyOfficial = SessionParser.Parse(
+                "某公众号助手\n消息\n10:00",
+                0,
+                "session_item_wxid_name_only");
+            Expect(
+                nameOnlyOfficial.Kind == ChatSessionKind.Unknown,
+                "Contact name text was incorrectly used as account evidence.",
                 failures);
         }
 
@@ -1657,19 +1711,15 @@ namespace WeChatMessageNotifier
                 "Default notification display mode was not WindowsToast.",
                 failures);
             Expect(
-                !NotifierApplicationContext.ShouldUseCustomPopup(settings),
-                "WindowsToast mode would use the custom popup path.",
-                failures);
-            Expect(
                 NotifierApplicationContext.WindowsNotificationDurationSettingsUri ==
                 "ms-settings:easeofaccess-visualeffects",
                 "Windows notification duration settings URI changed unexpectedly.",
                 failures);
-
-            settings.NotificationDisplayMode = NotificationDisplayMode.CustomPopup;
             Expect(
-                NotifierApplicationContext.ShouldUseCustomPopup(settings),
-                "CustomPopup mode did not enable the custom popup path.",
+                WindowsNotificationCenter.BuildFileUriForTest(
+                    @"C:\Temp\weixin icon.png") ==
+                "file:///C:/Temp/weixin%20icon.png",
+                "Toast logo file URI was not encoded correctly.",
                 failures);
 
             var directory = Path.Combine(
@@ -1864,6 +1914,28 @@ namespace WeChatMessageNotifier
                 failures);
             settings.ClearOverride("a1b2c3d4");
 
+            var overrideKinds = new[]
+            {
+                ChatSessionKind.OfficialAccount,
+                ChatSessionKind.ServiceAccount,
+                ChatSessionKind.GroupChat,
+                ChatSessionKind.MutedGroupChat,
+                ChatSessionKind.DirectContact,
+                ChatSessionKind.Unknown
+            };
+            for (var index = 0; index < overrideKinds.Length; index++)
+            {
+                var hash = "abc0000" + index.ToString();
+                settings.SetOverride(hash, overrideKinds[index]);
+                Expect(
+                    settings.ResolveKind(hash, ChatSessionKind.Unknown) ==
+                    overrideKinds[index],
+                    "Manual session kind override did not support " +
+                    overrideKinds[index] +
+                    ".",
+                    failures);
+            }
+
             var detector = new SessionChangeDetector();
             var baseline = SessionParser.Parse(
                 "普通联系人\n旧消息\n11:00",
@@ -1918,7 +1990,9 @@ namespace WeChatMessageNotifier
                 IsSelected = false,
                 UnreadCount = 1,
                 RawLineCount = 5,
-                HasMutedLabel = true
+                HasMutedLabel = true,
+                HasGroupMarker = true,
+                HasOfficialMarker = true
             };
             var diagnostic =
                 NotifierApplicationContext.FormatCandidateDiagnostic(
@@ -1929,7 +2003,16 @@ namespace WeChatMessageNotifier
                 diagnostic.IndexOf("秘密联系人", StringComparison.Ordinal) < 0 &&
                 diagnostic.IndexOf("秘密消息正文", StringComparison.Ordinal) < 0 &&
                 diagnostic.IndexOf("ContactHash=a1b2c3d4", StringComparison.Ordinal) >= 0 &&
-                diagnostic.IndexOf("Result=Blocked", StringComparison.Ordinal) >= 0,
+                diagnostic.IndexOf("Kind=Unknown", StringComparison.Ordinal) >= 0 &&
+                diagnostic.IndexOf("IsMuted=True", StringComparison.Ordinal) >= 0 &&
+                diagnostic.IndexOf("HasGroupMarker=True", StringComparison.Ordinal) >= 0 &&
+                diagnostic.IndexOf("HasOfficialMarker=True", StringComparison.Ordinal) >= 0 &&
+                diagnostic.IndexOf("FilterEnabled=False", StringComparison.Ordinal) >= 0 &&
+                diagnostic.IndexOf("Result=Blocked", StringComparison.Ordinal) >= 0 &&
+                diagnostic.IndexOf("DetectedKind", StringComparison.Ordinal) < 0 &&
+                diagnostic.IndexOf("UnreadCount", StringComparison.Ordinal) < 0 &&
+                diagnostic.IndexOf("RawLineCount", StringComparison.Ordinal) < 0 &&
+                diagnostic.IndexOf("IsSelected", StringComparison.Ordinal) < 0,
                 "Diagnostic output leaked private content or omitted metadata.",
                 failures);
         }
@@ -2068,6 +2151,73 @@ namespace WeChatMessageNotifier
                     Directory.Delete(directory, true);
                 }
             }
+        }
+
+        private static void TestToastActivationRequest(ICollection<string> failures)
+        {
+            var original = ToastActivationRequest.FromSession(
+                "stable-uia-key",
+                ChatSessionKind.ServiceAccount);
+            ToastActivationRequest parsed;
+            Expect(
+                ToastActivationRequest.TryParseJson(original.ToJson(), out parsed) &&
+                parsed.SessionKey == "stable-uia-key" &&
+                parsed.SessionKind == ChatSessionKind.ServiceAccount &&
+                parsed.Route == ToastActivationRoute.ServiceAccount,
+                "Structured toast activation request did not round trip.",
+                failures);
+            var legacy = Program.ExtractToastActivationRequest(new[]
+            {
+                "wechat-message-notifier://open?session=legacy-key"
+            });
+            Expect(
+                legacy != null && legacy.SessionKey == "legacy-key" &&
+                legacy.Route == ToastActivationRoute.MainSession,
+                "Legacy toast activation URI was not compatible.",
+                failures);
+            Expect(
+                original.ToJson().IndexOf("preview", StringComparison.OrdinalIgnoreCase) < 0 &&
+                original.ToJson().IndexOf("contact", StringComparison.OrdinalIgnoreCase) < 0,
+                "Activation payload contains display content fields.",
+                failures);
+        }
+
+        private static void TestPanelAvoidanceState(ICollection<string> failures)
+        {
+            var state = new PanelAvoidanceState();
+            Expect(
+                state.SetTargets(-220, -160, MotionMode.Standard) &&
+                state.TargetOffsetX < 0 && state.TargetOffsetY < 0 &&
+                state.CurrentOffsetX == 0 && state.CurrentOffsetY == 0,
+                "Panel target changed by jumping current offsets.",
+                failures);
+            state.Advance(MotionMode.Standard);
+            Expect(
+                state.CurrentOffsetX < 0 && state.CurrentOffsetX > -220 &&
+                state.CurrentOffsetY < 0 && state.CurrentOffsetY > -160,
+                "Panel avoidance did not advance smoothly toward both targets.",
+                failures);
+            var velocityBefore = state.VelocityX;
+            state.SetTargets(-260, -120, MotionMode.Standard);
+            Expect(
+                state.VelocityX == velocityBefore,
+                "Panel target update reset X velocity.",
+                failures);
+            for (var index = 0; index < 160 && !state.IsSettled; index++)
+            {
+                state.Advance(MotionMode.Standard);
+            }
+            Expect(
+                state.IsSettled &&
+                Math.Abs(state.CurrentOffsetX + 260) < 1 &&
+                Math.Abs(state.CurrentOffsetY + 120) < 1,
+                "Panel avoidance did not settle at the combined target.",
+                failures);
+            state.SetTargets(0, 0, MotionMode.Off);
+            Expect(
+                state.IsSettled && state.CurrentOffsetX == 0 && state.CurrentOffsetY == 0,
+                "MotionMode.Off did not directly restore panel avoidance.",
+                failures);
         }
 
         private static void TestLogRotation(ICollection<string> failures)

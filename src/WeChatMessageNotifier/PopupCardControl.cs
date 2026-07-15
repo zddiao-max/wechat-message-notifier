@@ -62,11 +62,14 @@ namespace WeChatMessageNotifier
                 ControlStyles.AllPaintingInWmPaint |
                 ControlStyles.OptimizedDoubleBuffer |
                 ControlStyles.UserPaint |
+                ControlStyles.SupportsTransparentBackColor |
                 ControlStyles.ResizeRedraw,
                 true);
             Width = metrics.CardWidth;
             Height = metrics.CardHeight;
-            BackColor = GetHostBackgroundColor();
+            BackColor = visualMode == PopupVisualMode.Glass
+                ? Color.Transparent
+                : GetHostBackgroundColor();
             Cursor = Cursors.Hand;
 
             RebuildFonts();
@@ -231,7 +234,9 @@ namespace WeChatMessageNotifier
             }
 
             this.visualMode = visualMode;
-            BackColor = GetHostBackgroundColor();
+            BackColor = visualMode == PopupVisualMode.Glass
+                ? Color.Transparent
+                : GetHostBackgroundColor();
             Invalidate();
         }
 
@@ -245,12 +250,13 @@ namespace WeChatMessageNotifier
             var hostBackground = GetHostBackgroundColor();
             var cardBackground = GetCardBackgroundColor();
             var cardBorder = GetCardBorderColor();
-            // Always clear the card's own drawing surface to a stable light
-            // underlay before painting text. Leaving a child control fully
-            // transparent over DWM/Accent makes ClearType/GDI composition
-            // unpredictable and produced the white, washed-out text seen in
-            // the screenshot.
-            eventArgs.Graphics.Clear(hostBackground);
+            // In Glass mode PopupHostForm owns the one and only background
+            // composition. This control draws foreground text and hit targets
+            // only, preventing a second tint/clear layer under every card.
+            if (visualMode == PopupVisualMode.Solid)
+            {
+                eventArgs.Graphics.Clear(hostBackground);
+            }
             if (visualOpacity <= 0.005)
             {
                 return;
@@ -278,16 +284,19 @@ namespace WeChatMessageNotifier
                 GetPaintColor(hostBackground, cardBorder, opacity),
                 Math.Max(1, DpiUtil.ScaleInt(1, metrics.Scale))))
             {
-                eventArgs.Graphics.FillPath(background, path);
-                eventArgs.Graphics.SetClip(path);
-                eventArgs.Graphics.FillRectangle(
-                    accent,
-                    0,
-                    0,
-                    metrics.AccentWidth,
-                    metrics.CardHeight);
-                eventArgs.Graphics.ResetClip();
-                eventArgs.Graphics.DrawPath(border, path);
+                if (visualMode == PopupVisualMode.Solid)
+                {
+                    eventArgs.Graphics.FillPath(background, path);
+                    eventArgs.Graphics.SetClip(path);
+                    eventArgs.Graphics.FillRectangle(
+                        accent,
+                        0,
+                        0,
+                        metrics.AccentWidth,
+                        metrics.CardHeight);
+                    eventArgs.Graphics.ResetClip();
+                    eventArgs.Graphics.DrawPath(border, path);
+                }
             }
 
             TextRenderer.DrawText(
@@ -336,6 +345,15 @@ namespace WeChatMessageNotifier
                     TextFormatFlags.NoClipping |
                     TextFormatFlags.SingleLine);
             }
+        }
+
+        protected override void OnPaintBackground(PaintEventArgs eventArgs)
+        {
+            if (visualMode == PopupVisualMode.Solid)
+            {
+                base.OnPaintBackground(eventArgs);
+            }
+            // Glass background is painted exactly once by PopupHostForm.
         }
 
         protected override void OnMouseClick(MouseEventArgs eventArgs)

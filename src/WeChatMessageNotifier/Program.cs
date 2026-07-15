@@ -97,7 +97,7 @@ namespace WeChatMessageNotifier
             return false;
         }
 
-        internal static string ReadActivationPayload()
+        internal static ToastActivationRequest ReadActivationPayload()
         {
             try
             {
@@ -109,7 +109,19 @@ namespace WeChatMessageNotifier
 
                 var value = File.ReadAllText(path, Encoding.UTF8);
                 File.Delete(path);
-                return string.IsNullOrWhiteSpace(value) ? null : value;
+                ToastActivationRequest request;
+                if (ToastActivationRequest.TryParseJson(value, out request))
+                {
+                    return request;
+                }
+
+                // Compatibility with payloads produced before v2.5. The
+                // legacy file contained the stable session key only.
+                return string.IsNullOrWhiteSpace(value)
+                    ? null
+                    : ToastActivationRequest.FromSession(
+                        value.Trim(),
+                        ChatSessionKind.Unknown);
             }
             catch
             {
@@ -117,7 +129,7 @@ namespace WeChatMessageNotifier
             }
         }
 
-        internal static string ExtractToastActivationSessionKey(string[] args)
+        internal static ToastActivationRequest ExtractToastActivationRequest(string[] args)
         {
             if (args == null)
             {
@@ -131,17 +143,22 @@ namespace WeChatMessageNotifier
                         ProtocolName,
                         StringComparison.OrdinalIgnoreCase))
                 {
-                    return ExtractSessionFromUri(value);
+                    return ExtractRequestFromUri(value);
                 }
             }
-
             return null;
+        }
+
+        internal static string ExtractToastActivationSessionKey(string[] args)
+        {
+            var request = ExtractToastActivationRequest(args);
+            return request == null ? null : request.SessionKey;
         }
 
         private static void WriteActivationPayload(string[] args)
         {
-            var sessionKey = ExtractToastActivationSessionKey(args);
-            if (string.IsNullOrWhiteSpace(sessionKey))
+            var request = ExtractToastActivationRequest(args);
+            if (request == null || string.IsNullOrWhiteSpace(request.SessionKey))
             {
                 return;
             }
@@ -150,10 +167,16 @@ namespace WeChatMessageNotifier
             {
                 var path = GetActivationPayloadPath();
                 Directory.CreateDirectory(Path.GetDirectoryName(path));
-                File.WriteAllText(
-                    path,
-                    sessionKey,
-                    new UTF8Encoding(false));
+                var temporary = path + ".tmp";
+                File.WriteAllText(temporary, request.ToJson(), new UTF8Encoding(true));
+                if (File.Exists(path))
+                {
+                    File.Replace(temporary, path, null);
+                }
+                else
+                {
+                    File.Move(temporary, path);
+                }
             }
             catch
             {
@@ -163,7 +186,7 @@ namespace WeChatMessageNotifier
             }
         }
 
-        private static string ExtractSessionFromUri(string value)
+        private static ToastActivationRequest ExtractRequestFromUri(string value)
         {
             try
             {
@@ -179,6 +202,9 @@ namespace WeChatMessageNotifier
                     query = query.Substring(1);
                 }
 
+                string sessionKey = null;
+                ChatSessionKind kind = ChatSessionKind.Unknown;
+                ToastActivationRoute route = ToastActivationRoute.MainSession;
                 foreach (var pair in query.Split('&'))
                 {
                     var parts = pair.Split(new[] { '=' }, 2);
@@ -188,17 +214,26 @@ namespace WeChatMessageNotifier
                             "session",
                             StringComparison.OrdinalIgnoreCase))
                     {
-                        return Uri.UnescapeDataString(
-                            parts[1].Replace("+", " "));
+                        sessionKey = Uri.UnescapeDataString(parts[1].Replace("+", " "));
+                    }
+                    else if (parts.Length == 2 && string.Equals(parts[0], "kind", StringComparison.OrdinalIgnoreCase))
+                    {
+                        Enum.TryParse(Uri.UnescapeDataString(parts[1]), true, out kind);
+                    }
+                    else if (parts.Length == 2 && string.Equals(parts[0], "route", StringComparison.OrdinalIgnoreCase))
+                    {
+                        Enum.TryParse(Uri.UnescapeDataString(parts[1]), true, out route);
                     }
                 }
+                return string.IsNullOrWhiteSpace(sessionKey)
+                    ? null
+                    : new ToastActivationRequest(sessionKey, kind, route);
             }
             catch
             {
                 return null;
             }
 
-            return null;
         }
 
         private static string GetActivationPayloadPath()

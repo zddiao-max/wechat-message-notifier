@@ -3,6 +3,8 @@
 
 using System;
 using System.Collections.Generic;
+using System.Drawing;
+using System.Drawing.Imaging;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Runtime.InteropServices.ComTypes;
@@ -23,7 +25,7 @@ namespace WeChatMessageNotifier
         private const string ProtocolName = "wechat-message-notifier";
         private const string ProtocolUri = ProtocolName + "://open";
 
-        private readonly Action<string> activateWeChat;
+        private readonly Action<ToastActivationRequest> activateWeChat;
         private readonly Logger logger;
         private readonly SynchronizationContext uiContext;
         private readonly bool emitNativeToast;
@@ -40,14 +42,15 @@ namespace WeChatMessageNotifier
         private string lastMessageForTest;
         private bool lastSuppressPopupForTest;
         private int showCountForTest;
+        private string toastLogoPath;
 
-        internal WindowsNotificationCenter(Action<string> activateWeChat, Logger logger)
+        internal WindowsNotificationCenter(Action<ToastActivationRequest> activateWeChat, Logger logger)
             : this(activateWeChat, logger, true, true)
         {
         }
 
         internal WindowsNotificationCenter(
-            Action<string> activateWeChat,
+            Action<ToastActivationRequest> activateWeChat,
             Logger logger,
             bool registerWithWindows,
             bool emitNativeToast)
@@ -63,8 +66,17 @@ namespace WeChatMessageNotifier
                 {
                     NativeMethods.SetCurrentProcessExplicitAppUserModelID(
                         AppUserModelId);
-                    EnsureStartMenuShortcut();
+                    var iconSourcePath = ResolveWeChatIconSourcePath();
+                    toastLogoPath = PrepareToastLogo(iconSourcePath);
+                    EnsureStartMenuShortcut(iconSourcePath);
                     EnsureProtocolRegistration();
+                    logger.Info(
+                        "Windows toast icon initialized. HasWeChatIconSource=" +
+                        (!string.IsNullOrWhiteSpace(iconSourcePath) &&
+                         File.Exists(iconSourcePath)) +
+                        " HasToastLogo=" +
+                        (!string.IsNullOrWhiteSpace(toastLogoPath) &&
+                         File.Exists(toastLogoPath)));
                 }
                 available = true;
                 logger.Info("Windows notification center integration initialized.");
@@ -74,6 +86,17 @@ namespace WeChatMessageNotifier
                 available = false;
                 logger.Error("Windows notification center initialization failed", exception);
             }
+        }
+
+        internal WindowsNotificationCenter(Action<string> activateWeChat, Logger logger, bool registerWithWindows, bool emitNativeToast)
+            : this(delegate(ToastActivationRequest request)
+            {
+                if (activateWeChat != null)
+                {
+                    activateWeChat(request == null ? null : request.SessionKey);
+                }
+            }, logger, registerWithWindows, emitNativeToast)
+        {
         }
 
         internal bool Show(string title, string message, bool suppressPopup)
@@ -89,6 +112,7 @@ namespace WeChatMessageNotifier
 
         internal int ShowMessage(
             string sessionKey,
+            ChatSessionKind sessionKind,
             string title,
             string latestPreview,
             bool privacyMode,
@@ -119,8 +143,18 @@ namespace WeChatMessageNotifier
                 displayedTitle,
                 displayedMessage,
                 suppressPopup,
-                sessionKey);
+                ToastActivationRequest.FromSession(sessionKey, sessionKind));
             return state.MessageCount;
+        }
+
+        internal int ShowMessage(
+            string sessionKey,
+            string title,
+            string latestPreview,
+            bool privacyMode,
+            bool suppressPopup)
+        {
+            return ShowMessage(sessionKey, ChatSessionKind.Unknown, title, latestPreview, privacyMode, suppressPopup);
         }
 
         internal int GetMessageCountForTest(string sessionKey)
@@ -174,12 +208,27 @@ namespace WeChatMessageNotifier
             get { return showCountForTest; }
         }
 
+        internal string ToastLogoPathForTest
+        {
+            get { return toastLogoPath; }
+        }
+
         internal void SimulateActivationForTest(string sessionKey)
         {
             if (activateWeChat != null)
             {
-                activateWeChat(sessionKey);
+                activateWeChat(ToastActivationRequest.FromSession(sessionKey, ChatSessionKind.Unknown));
             }
+        }
+
+        internal static string BuildFileUriForTest(string path)
+        {
+            return BuildFileUri(path);
+        }
+
+        internal static string ResolveWeChatIconSourcePathForTest()
+        {
+            return ResolveWeChatIconSourcePath();
         }
 
         private bool ShowToast(
@@ -187,7 +236,7 @@ namespace WeChatMessageNotifier
             string title,
             string message,
             bool suppressPopup,
-            string sessionKey)
+            ToastActivationRequest activationRequest)
         {
             if (!available || disposed)
             {
@@ -213,9 +262,10 @@ namespace WeChatMessageNotifier
                 var textNodes = xml.GetElementsByTagName("text");
                 textNodes[0].AppendChild(xml.CreateTextNode(title));
                 textNodes[1].AppendChild(xml.CreateTextNode(message));
+                TryAddAppLogoOverride(xml, toastLogoPath);
                 xml.DocumentElement.SetAttribute(
                     "launch",
-                    BuildProtocolUri(sessionKey));
+                    BuildProtocolUri(activationRequest));
                 xml.DocumentElement.SetAttribute("activationType", "protocol");
 
                 var history = ToastNotificationManager.History.GetHistory(
@@ -246,7 +296,7 @@ namespace WeChatMessageNotifier
                     new Windows.Foundation.TypedEventHandler<ToastNotification, object>(
                     delegate
                     {
-                        Activate(sessionKey);
+                        Activate(activationRequest);
                         Release(toast);
                     });
                 dismissedHandler =
@@ -298,7 +348,7 @@ namespace WeChatMessageNotifier
             }
         }
 
-        private void Activate(string sessionKey)
+        private void Activate(ToastActivationRequest activationRequest)
         {
             if (uiContext != null)
             {
@@ -306,13 +356,13 @@ namespace WeChatMessageNotifier
                 {
                     if (activateWeChat != null)
                     {
-                        activateWeChat(sessionKey);
+                        activateWeChat(activationRequest);
                     }
                 }, null);
             }
             else if (activateWeChat != null)
             {
-                activateWeChat(sessionKey);
+                activateWeChat(activationRequest);
             }
         }
 
@@ -333,16 +383,17 @@ namespace WeChatMessageNotifier
                 : latestPreview;
         }
 
-        private static string BuildProtocolUri(string sessionKey)
+        private static string BuildProtocolUri(ToastActivationRequest activationRequest)
         {
-            if (string.IsNullOrWhiteSpace(sessionKey))
+            if (activationRequest == null || string.IsNullOrWhiteSpace(activationRequest.SessionKey))
             {
                 return ProtocolUri;
             }
 
             return ProtocolUri +
-                "?session=" +
-                Uri.EscapeDataString(sessionKey);
+                "?session=" + Uri.EscapeDataString(activationRequest.SessionKey) +
+                "&kind=" + Uri.EscapeDataString(activationRequest.SessionKind.ToString()) +
+                "&route=" + Uri.EscapeDataString(activationRequest.Route.ToString());
         }
 
         private static string BuildTag(string sessionKey)
@@ -358,6 +409,157 @@ namespace WeChatMessageNotifier
                 }
                 return builder.ToString();
             }
+        }
+
+        private static void TryAddAppLogoOverride(
+            XmlDocument xml,
+            string logoPath)
+        {
+            if (string.IsNullOrWhiteSpace(logoPath) ||
+                !File.Exists(logoPath))
+            {
+                return;
+            }
+
+            var bindings = xml.GetElementsByTagName("binding");
+            if (bindings == null || bindings.Length == 0)
+            {
+                return;
+            }
+
+            var binding = bindings[0] as XmlElement;
+            if (binding == null)
+            {
+                return;
+            }
+
+            var image = xml.CreateElement("image");
+            image.SetAttribute("placement", "appLogoOverride");
+            image.SetAttribute("hint-crop", "circle");
+            image.SetAttribute("src", BuildFileUri(logoPath));
+            binding.AppendChild(image);
+        }
+
+        private static string BuildFileUri(string path)
+        {
+            return new Uri(path).AbsoluteUri;
+        }
+
+        private static string PrepareToastLogo(string iconSourcePath)
+        {
+            if (string.IsNullOrWhiteSpace(iconSourcePath) ||
+                !File.Exists(iconSourcePath))
+            {
+                return null;
+            }
+
+            try
+            {
+                using (var icon = Icon.ExtractAssociatedIcon(iconSourcePath))
+                {
+                    if (icon == null)
+                    {
+                        return null;
+                    }
+
+                    var directory = Path.Combine(
+                        Environment.GetFolderPath(
+                            Environment.SpecialFolder.LocalApplicationData),
+                        "WeChatMessageNotifier");
+                    Directory.CreateDirectory(directory);
+                    var iconPath = Path.Combine(
+                        directory,
+                        "weixin-toast-icon.png");
+                    using (var bitmap = icon.ToBitmap())
+                    {
+                        bitmap.Save(iconPath, ImageFormat.Png);
+                    }
+                    return iconPath;
+                }
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private static string ResolveWeChatIconSourcePath()
+        {
+            var processPath = FindRunningWeChatProcessPath();
+            if (!string.IsNullOrWhiteSpace(processPath))
+            {
+                return processPath;
+            }
+
+            foreach (var candidate in GetCommonWeChatExecutablePaths())
+            {
+                if (!string.IsNullOrWhiteSpace(candidate) &&
+                    File.Exists(candidate))
+                {
+                    return candidate;
+                }
+            }
+
+            return null;
+        }
+
+        private static string FindRunningWeChatProcessPath()
+        {
+            foreach (var processName in new[] { "Weixin", "WeChat" })
+            {
+                try
+                {
+                    foreach (var process in
+                        System.Diagnostics.Process.GetProcessesByName(
+                            processName))
+                    {
+                        using (process)
+                        {
+                            try
+                            {
+                                if (!string.IsNullOrWhiteSpace(process.MainModule.FileName) &&
+                                    File.Exists(process.MainModule.FileName))
+                                {
+                                    return process.MainModule.FileName;
+                                }
+                            }
+                            catch
+                            {
+                                // Access to another process module can be
+                                // blocked by Windows. Fall through to common
+                                // installation paths below.
+                            }
+                        }
+                    }
+                }
+                catch
+                {
+                    // Best-effort process lookup.
+                }
+            }
+
+            return null;
+        }
+
+        private static IEnumerable<string> GetCommonWeChatExecutablePaths()
+        {
+            var programFiles = Environment.GetFolderPath(
+                Environment.SpecialFolder.ProgramFiles);
+            var programFilesX86 = Environment.GetFolderPath(
+                Environment.SpecialFolder.ProgramFilesX86);
+            var localAppData = Environment.GetFolderPath(
+                Environment.SpecialFolder.LocalApplicationData);
+            var appData = Environment.GetFolderPath(
+                Environment.SpecialFolder.ApplicationData);
+
+            yield return Path.Combine(programFiles, "Tencent", "Weixin", "Weixin.exe");
+            yield return Path.Combine(programFilesX86, "Tencent", "Weixin", "Weixin.exe");
+            yield return Path.Combine(localAppData, "Tencent", "Weixin", "Weixin.exe");
+            yield return Path.Combine(appData, "Tencent", "Weixin", "Weixin.exe");
+            yield return Path.Combine(programFiles, "Tencent", "WeChat", "WeChat.exe");
+            yield return Path.Combine(programFilesX86, "Tencent", "WeChat", "WeChat.exe");
+            yield return Path.Combine(localAppData, "Tencent", "WeChat", "WeChat.exe");
+            yield return Path.Combine(appData, "Tencent", "WeChat", "WeChat.exe");
         }
 
         public void Dispose()
@@ -413,12 +615,17 @@ namespace WeChatMessageNotifier
             activeToasts.Clear();
         }
 
-        private static void EnsureStartMenuShortcut()
+        private static void EnsureStartMenuShortcut(string iconSourcePath)
         {
             var programs = Environment.GetFolderPath(
                 Environment.SpecialFolder.Programs);
             var shortcutPath = Path.Combine(programs, ShortcutName);
             var executablePath = Application.ExecutablePath;
+            var shortcutIconPath =
+                !string.IsNullOrWhiteSpace(iconSourcePath) &&
+                File.Exists(iconSourcePath)
+                    ? iconSourcePath
+                    : executablePath;
 
             var shellLinkObject = Activator.CreateInstance(
                 Type.GetTypeFromCLSID(
@@ -427,7 +634,7 @@ namespace WeChatMessageNotifier
             shellLink.SetPath(executablePath);
             shellLink.SetWorkingDirectory(Path.GetDirectoryName(executablePath));
             shellLink.SetDescription("Windows 微信消息提醒器");
-            shellLink.SetIconLocation(executablePath, 0);
+            shellLink.SetIconLocation(shortcutIconPath, 0);
 
             var propertyStore = (IPropertyStore)shellLinkObject;
             var appIdKey = new PropertyKey(

@@ -46,7 +46,11 @@ namespace WeChatMessageNotifier
         private const string MutedLabel = "\u6D88\u606F\u514D\u6253\u6270";
         private const string GroupChatLabel = "\u7FA4\u804A";
 
-        internal static ChatSession Parse(string rawName, int position, string automationId = null)
+        internal static ChatSession Parse(
+            string rawName,
+            int position,
+            string automationId = null,
+            bool hasMutedVisualMarker = false)
         {
             if (string.IsNullOrWhiteSpace(rawName))
             {
@@ -146,18 +150,27 @@ namespace WeChatMessageNotifier
             var hasServiceLabel = ContainsExactLine(
                 lines,
                 ServiceAccountLabel);
-            var hasOfficialLabel =
+            var hasOfficialMarker =
                 ContainsExactLine(lines, SubscriptionAccountLabel) ||
-                ContainsExactLine(lines, OfficialAccountLabel);
-            var isMuted = ContainsExactLine(lines, MutedLabel);
+                ContainsExactLine(lines, OfficialAccountLabel) ||
+                HasStableOfficialAccountId(sessionKey, automationId);
+            var isMuted =
+                ContainsExactLine(lines, MutedLabel) ||
+                ContainsExactLine(lines, "\u514D\u6253\u6270") ||
+                ContainsExactLine(lines, "\u9759\u97F3") ||
+                hasMutedVisualMarker;
             var hasGroupMarker =
-                sessionKey.IndexOf(
-                    "@chatroom",
-                    StringComparison.OrdinalIgnoreCase) >= 0 ||
-                ContainsExactLine(lines, GroupChatLabel);
+                HasStableGroupId(sessionKey) ||
+                HasStableGroupId(automationId) ||
+                ContainsExactLine(lines, GroupChatLabel) ||
+                // A crossed-bell marker is strong UIA evidence of mute.  Only
+                // combine it with a group-shaped display label (name plus a
+                // visible member count) to cover WeChat rows that omit the
+                // @chatroom identity without guessing from "群" alone.
+                (hasMutedVisualMarker && LooksLikeGroupDisplayName(contact));
             var kind = Classify(
                 hasServiceLabel,
-                hasOfficialLabel,
+                hasOfficialMarker,
                 isMuted,
                 hasGroupMarker);
             return new ChatSession
@@ -174,8 +187,10 @@ namespace WeChatMessageNotifier
                 ContactHash = ShortHash(sessionKey),
                 RawLineCount = lines.Count,
                 HasServiceLabel = hasServiceLabel,
-                HasOfficialLabel = hasOfficialLabel,
+                HasOfficialLabel = hasOfficialMarker,
+                HasOfficialMarker = hasOfficialMarker,
                 HasMutedLabel = isMuted,
+                HasMutedVisualMarker = hasMutedVisualMarker,
                 HasGroupMarker = hasGroupMarker,
                 // Timestamp text is presentation state: "刚刚" later becomes
                 // a clock time even though the message itself did not change.
@@ -185,7 +200,7 @@ namespace WeChatMessageNotifier
 
         private static ChatSessionKind Classify(
             bool hasServiceLabel,
-            bool hasOfficialLabel,
+            bool hasOfficialMarker,
             bool isMuted,
             bool hasGroupMarker)
         {
@@ -193,7 +208,7 @@ namespace WeChatMessageNotifier
             {
                 return ChatSessionKind.ServiceAccount;
             }
-            if (hasOfficialLabel)
+            if (hasOfficialMarker)
             {
                 return ChatSessionKind.OfficialAccount;
             }
@@ -209,6 +224,72 @@ namespace WeChatMessageNotifier
             // That does not prove a row is a direct contact: it can also be a
             // group or account. Unknown is safer and can be manually overridden.
             return ChatSessionKind.Unknown;
+        }
+
+        private static bool HasStableOfficialAccountId(
+            string sessionKey,
+            string automationId)
+        {
+            return StartsWithOfficialAccountId(sessionKey) ||
+                   StartsWithOfficialAccountId(automationId);
+        }
+
+        private static bool StartsWithOfficialAccountId(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return false;
+            }
+
+            const string SessionItemPrefix = "session_item_";
+            var normalized = value.Trim();
+            if (normalized.StartsWith(
+                SessionItemPrefix,
+                StringComparison.Ordinal))
+            {
+                normalized = normalized.Substring(SessionItemPrefix.Length);
+            }
+
+            return normalized.StartsWith(
+                "gh_",
+                StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool HasStableGroupId(string value)
+        {
+            return !string.IsNullOrWhiteSpace(value) &&
+                   value.IndexOf(
+                       "@chatroom",
+                       StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        private static bool LooksLikeGroupDisplayName(string contact)
+        {
+            if (string.IsNullOrWhiteSpace(contact) ||
+                contact.IndexOf('\u7FA4') < 0)
+            {
+                return false;
+            }
+
+            var trimmed = contact.TrimEnd();
+            var opening = Math.Max(
+                trimmed.LastIndexOf('('),
+                trimmed.LastIndexOf('\uFF08'));
+            if (opening < 1 || opening >= trimmed.Length - 3)
+            {
+                return false;
+            }
+
+            var closing = trimmed[trimmed.Length - 1];
+            if (closing != ')' && closing != '\uFF09')
+            {
+                return false;
+            }
+
+            int memberCount;
+            return int.TryParse(
+                trimmed.Substring(opening + 1, trimmed.Length - opening - 2),
+                out memberCount) && memberCount >= 10;
         }
 
         private static bool ContainsExactLine(

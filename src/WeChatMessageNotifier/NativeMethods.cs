@@ -42,6 +42,12 @@ namespace WeChatMessageNotifier
         internal static extern bool EnumWindows(EnumWindowsProc callback, IntPtr lParam);
 
         [DllImport("user32.dll")]
+        internal static extern bool EnumChildWindows(
+            IntPtr parent,
+            EnumWindowsProc callback,
+            IntPtr lParam);
+
+        [DllImport("user32.dll")]
         internal static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
 
         [DllImport("user32.dll")]
@@ -329,6 +335,41 @@ namespace WeChatMessageNotifier
             var buffer = new StringBuilder(256);
             GetClassName(hWnd, buffer, buffer.Capacity);
             return buffer.ToString();
+        }
+
+        internal static bool TryGetWindowBounds(IntPtr hWnd, out Rectangle bounds)
+        {
+            bounds = Rectangle.Empty;
+            NativeRect nativeRect;
+            if (!GetWindowRect(hWnd, out nativeRect))
+            {
+                return false;
+            }
+
+            bounds = Rectangle.FromLTRB(
+                nativeRect.Left,
+                nativeRect.Top,
+                nativeRect.Right,
+                nativeRect.Bottom);
+            return bounds.Width > 0 && bounds.Height > 0;
+        }
+
+        internal static bool IsWindowCloaked(IntPtr hWnd)
+        {
+            try
+            {
+                int cloaked;
+                return DwmGetWindowAttribute(
+                           hWnd,
+                           DwmwaCloaked,
+                           out cloaked,
+                           sizeof(int)) == 0 &&
+                       cloaked != 0;
+            }
+            catch
+            {
+                return false;
+            }
         }
 
         internal static bool PostLeftClick(

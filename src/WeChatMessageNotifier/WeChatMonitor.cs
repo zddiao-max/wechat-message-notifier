@@ -4,9 +4,11 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Drawing;
 using System.Linq;
 using System.Text;
 using System.Windows.Automation;
+using System.Windows.Forms;
 
 namespace WeChatMessageNotifier
 {
@@ -19,6 +21,8 @@ namespace WeChatMessageNotifier
         private readonly SessionChangeDetector detector = new SessionChangeDetector();
         private readonly Dictionary<ChatSessionKind, int> lastKindCounts =
             new Dictionary<ChatSessionKind, int>();
+        private readonly Dictionary<string, SessionNavigationInfo> navigationCatalog =
+            new Dictionary<string, SessionNavigationInfo>(StringComparer.Ordinal);
         private IntPtr mainWindow;
         private DateTime lastWindowSearch = DateTime.MinValue;
 
@@ -28,6 +32,11 @@ namespace WeChatMessageNotifier
         }
 
         internal IntPtr MainWindow
+        {
+            get { return mainWindow; }
+        }
+
+        internal IntPtr MainShellWindow
         {
             get { return mainWindow; }
         }
@@ -101,9 +110,22 @@ namespace WeChatMessageNotifier
                         continue;
                     }
 
-                    var session = SessionParser.Parse(name, index, automationId);
+                    var hasMutedVisualMarker = HasMutedVisualMarker(rawItems[index]);
+                    var session = SessionParser.Parse(
+                        name,
+                        index,
+                        automationId,
+                        hasMutedVisualMarker);
                     if (session != null)
                     {
+                        navigationCatalog[session.SessionKey] =
+                            new SessionNavigationInfo
+                            {
+                                SessionKey = session.SessionKey,
+                                DetectedKind = session.DetectedKind,
+                                SourcePageKind = DeterminePageKind(root),
+                                LastSeenTime = DateTime.Now
+                            };
                         object selectionPattern;
                         if (rawItems[index].TryGetCurrentPattern(
                             SelectionItemPattern.Pattern,
@@ -169,10 +191,17 @@ namespace WeChatMessageNotifier
 
         internal void ActivateWeChat()
         {
-            ActivateWeChat(null);
+            ActivateWeChat((string)null);
         }
 
         internal void ActivateWeChat(string sessionKey)
+        {
+            ActivateWeChat(ToastActivationRequest.FromSession(
+                sessionKey,
+                ChatSessionKind.Unknown));
+        }
+
+        internal void ActivateWeChat(ToastActivationRequest request)
         {
             if (!EnsureMainWindow())
             {
@@ -195,7 +224,7 @@ namespace WeChatMessageNotifier
             }
             NativeMethods.SetForegroundWindow(mainWindow);
 
-            if (string.IsNullOrWhiteSpace(sessionKey))
+            if (request == null || string.IsNullOrWhiteSpace(request.SessionKey))
             {
                 return;
             }
@@ -207,97 +236,234 @@ namespace WeChatMessageNotifier
                 {
                     return;
                 }
-
-                foreach (var item in FindSessionItems(root))
+                var route = request.Route;
+                SessionNavigationInfo known;
+                if (navigationCatalog.TryGetValue(request.SessionKey, out known) &&
+                    known.DetectedKind == ChatSessionKind.ServiceAccount)
                 {
-                    string name;
-                    string automationId;
-                    try
-                    {
-                        name = item.Current.Name;
-                        automationId = item.Current.AutomationId;
-                    }
-                    catch (ElementNotAvailableException)
-                    {
-                        continue;
-                    }
-
-                    var session = SessionParser.Parse(name, 0, automationId);
-                    if (session == null ||
-                        !string.Equals(
-                            session.SessionKey,
-                            sessionKey,
-                            StringComparison.Ordinal))
-                    {
-                        continue;
-                    }
-
-                    object pattern;
-                    if (item.TryGetCurrentPattern(
-                        ScrollItemPattern.Pattern,
-                        out pattern))
-                    {
-                        ((ScrollItemPattern)pattern).ScrollIntoView();
-                    }
-
-                    // WeChat 4.x exposes both Invoke and SelectionItem on chat
-                    // rows. Invoke may return successfully without changing the
-                    // active conversation (notably for service accounts), while
-                    // SelectionItem is the semantic operation for a list row.
-                    if (item.TryGetCurrentPattern(
-                        SelectionItemPattern.Pattern,
-                        out pattern))
-                    {
-                        ((SelectionItemPattern)pattern).Select();
-                        logger.Info(
-                            "Target WeChat session activated with selection pattern.");
-                    }
-                    else if (item.TryGetCurrentPattern(
-                        InvokePattern.Pattern,
-                        out pattern))
-                    {
-                        ((InvokePattern)pattern).Invoke();
-                        logger.Info(
-                            "Target WeChat session activated with invoke pattern.");
-                    }
-                    else
-                    {
-                        item.SetFocus();
-                        logger.Info(
-                            "Target WeChat session activated with focus fallback.");
-                    }
-
-                    // On WeChat 4.x, SelectionItem.Select can report success
-                    // without refreshing the conversation pane. Post a click
-                    // directly to the visible row inside WeChat. This neither
-                    // moves the user's pointer nor sends global mouse input.
-                    var rectangle = item.Current.BoundingRectangle;
-                    if (!rectangle.IsEmpty)
-                    {
-                        var center = new System.Drawing.Point(
-                            (int)(rectangle.Left + rectangle.Width / 2),
-                            (int)(rectangle.Top + rectangle.Height / 2));
-                        if (NativeMethods.PostLeftClick(mainWindow, center))
-                        {
-                            logger.Info(
-                                "Target WeChat session row click posted.");
-                        }
-                        else
-                        {
-                            logger.Info(
-                                "Target WeChat session row click could not be posted.");
-                        }
-                    }
-
-                    return;
+                    route = ToastActivationRoute.ServiceAccount;
                 }
 
-                logger.Info("Target WeChat session was not available in the loaded list.");
+                var success = route == ToastActivationRoute.ServiceAccount
+                    ? ActivateServiceAccount(root, request.SessionKey)
+                    : ActivateMainSession(root, request.SessionKey);
+                logger.Info("ActivationResult=" +
+                    (success ? "SelectedInMainShell" : "TargetNotFound") +
+                    " Route=" + route);
             }
             catch (Exception exception)
             {
                 logger.Error("Could not activate target WeChat session", exception);
             }
+        }
+
+        private bool ActivateMainSession(AutomationElement root, string sessionKey)
+        {
+            if (!EnsureMainSessionsPage(root))
+            {
+                return false;
+            }
+            var refreshed = AutomationElement.FromHandle(mainWindow);
+            return refreshed != null && ActivateSessionInCurrentList(refreshed, sessionKey);
+        }
+
+        private bool ActivateServiceAccount(AutomationElement root, string sessionKey)
+        {
+            if (!EnsureServiceAccountListPage(root))
+            {
+                return false;
+            }
+            var refreshed = AutomationElement.FromHandle(mainWindow);
+            var target = refreshed == null
+                ? null
+                : FindServiceAccountTarget(refreshed, sessionKey);
+            return target != null && ActivateElementOnce(target);
+        }
+
+        private bool EnsureMainSessionsPage(AutomationElement root)
+        {
+            if (DeterminePageKind(root) == WeChatPageKind.MainSessions)
+            {
+                return true;
+            }
+            return InvokeNavigationAndWait(root, false, WeChatPageKind.MainSessions);
+        }
+
+        private bool EnsureServiceAccountListPage(AutomationElement root)
+        {
+            var page = DeterminePageKind(root);
+            if (page == WeChatPageKind.ServiceAccountList)
+            {
+                return true;
+            }
+            if (page == WeChatPageKind.ServiceAccountDetail)
+            {
+                if (!InvokeNavigationAndWait(root, true, WeChatPageKind.ServiceAccountList))
+                {
+                    return false;
+                }
+                return true;
+            }
+            if (!EnsureMainSessionsPage(root))
+            {
+                return false;
+            }
+            var aggregate = FindServiceAccountAggregate(root);
+            return aggregate != null &&
+                   ActivateElementOnce(aggregate) &&
+                   WaitForPage(WeChatPageKind.ServiceAccountList, 1800);
+        }
+
+        private bool InvokeNavigationAndWait(
+            AutomationElement root,
+            bool preferBack,
+            WeChatPageKind expected)
+        {
+            var button = preferBack ? FindBackButton(root) : FindBackButton(root);
+            if (button == null && !preferBack)
+            {
+                button = FindMessagesNavigation(root);
+            }
+            return button != null && ActivateElementOnce(button) && WaitForPage(expected, 1800);
+        }
+
+        private bool WaitForPage(WeChatPageKind expected, int timeoutMilliseconds)
+        {
+            var until = DateTime.UtcNow.AddMilliseconds(timeoutMilliseconds);
+            while (DateTime.UtcNow < until)
+            {
+                var root = AutomationElement.FromHandle(mainWindow);
+                if (root != null && DeterminePageKind(root) == expected)
+                {
+                    return true;
+                }
+                System.Threading.Thread.Sleep(125);
+            }
+            return false;
+        }
+
+        private bool ActivateSessionInCurrentList(AutomationElement root, string sessionKey)
+        {
+            var target = FindSessionTarget(root, sessionKey);
+            if (target == null)
+            {
+                return false;
+            }
+            return ActivateElementOnce(target);
+        }
+
+        // A row receives one semantic action. The old unconditional native
+        // click after Select/Invoke was the source of duplicate navigation and
+        // detached chat windows.
+        private static bool ActivateElementOnce(AutomationElement element)
+        {
+            object pattern;
+            if (element.TryGetCurrentPattern(ScrollItemPattern.Pattern, out pattern))
+            {
+                ((ScrollItemPattern)pattern).ScrollIntoView();
+            }
+            if (element.TryGetCurrentPattern(SelectionItemPattern.Pattern, out pattern))
+            {
+                var selection = (SelectionItemPattern)pattern;
+                selection.Select();
+                try
+                {
+                    // Invoke is allowed only as the one fallback when the
+                    // semantic selection did not actually take effect.
+                    if (selection.Current.IsSelected)
+                    {
+                        return true;
+                    }
+                }
+                catch (ElementNotAvailableException)
+                {
+                    return false;
+                }
+            }
+            if (element.TryGetCurrentPattern(InvokePattern.Pattern, out pattern))
+            {
+                ((InvokePattern)pattern).Invoke();
+                return true;
+            }
+            return false;
+        }
+
+        private static AutomationElement FindBackButton(AutomationElement root)
+        {
+            return FindButtonByStableLabel(root, "返回", "Back");
+        }
+
+        private static AutomationElement FindMessagesNavigation(AutomationElement root)
+        {
+            return FindButtonByStableLabel(root, "消息", "Messages");
+        }
+
+        private static AutomationElement FindButtonByStableLabel(
+            AutomationElement root,
+            string primary,
+            string fallback)
+        {
+            var buttons = root.FindAll(TreeScope.Descendants,
+                new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Button));
+            foreach (AutomationElement button in buttons)
+            {
+                try
+                {
+                    var name = button.Current.Name ?? string.Empty;
+                    if (string.Equals(name, primary, StringComparison.Ordinal) ||
+                        string.Equals(name, fallback, StringComparison.OrdinalIgnoreCase))
+                    {
+                        return button;
+                    }
+                }
+                catch (ElementNotAvailableException) { }
+            }
+            return null;
+        }
+
+        private static AutomationElement FindServiceAccountAggregate(AutomationElement root)
+        {
+            foreach (var item in FindSessionItems(root))
+            {
+                try
+                {
+                    var session = SessionParser.Parse(item.Current.Name, 0, item.Current.AutomationId);
+                    if (session != null && session.Kind == ChatSessionKind.ServiceAccount)
+                    {
+                        return item;
+                    }
+                }
+                catch (ElementNotAvailableException) { }
+            }
+            return null;
+        }
+
+        private static AutomationElement FindServiceAccountTarget(
+            AutomationElement root,
+            string sessionKey)
+        {
+            return FindSessionTarget(root, sessionKey);
+        }
+
+        private static AutomationElement FindSessionTarget(
+            AutomationElement root,
+            string sessionKey)
+        {
+            foreach (var item in FindSessionItems(root))
+            {
+                try
+                {
+                    var session = SessionParser.Parse(
+                        item.Current.Name, 0, item.Current.AutomationId);
+                    if (session != null &&
+                        string.Equals(session.SessionKey, sessionKey, StringComparison.Ordinal))
+                    {
+                        return item;
+                    }
+                }
+                catch (ElementNotAvailableException) { }
+            }
+            return null;
         }
 
         private bool EnsureMainWindow()
@@ -345,13 +511,9 @@ namespace WeChatMessageNotifier
                         continue;
                     }
 
-                    var items = FindSessionItems(root);
-                    var score = items.Count;
-                    if (NativeMethods.IsWindowVisible(candidate))
-                    {
-                        score += 100;
-                    }
-                    if (score > bestScore && items.Count > 0)
+                    var snapshot = InspectWindow(candidate, root);
+                    var score = snapshot.MainShellScore;
+                    if (snapshot.Role == WeChatWindowRole.MainShell && score > bestScore)
                     {
                         best = candidate;
                         bestScore = score;
@@ -366,11 +528,86 @@ namespace WeChatMessageNotifier
             if (best != IntPtr.Zero)
             {
                 mainWindow = best;
-                logger.Info("Attached to WeChat main window.");
+                logger.Info("Attached to WeChat main shell window.");
                 return true;
             }
 
             return false;
+        }
+
+        // The crossed-bell shown by WeChat 4.x is frequently a separate icon
+        // control, not text included in the ListItem name.  Probe only
+        // non-text icon-like descendants; no contact name or message preview
+        // is logged or persisted by this check.
+        private static bool HasMutedVisualMarker(AutomationElement sessionItem)
+        {
+            if (sessionItem == null)
+            {
+                return false;
+            }
+
+            var iconConditions = new OrCondition(
+                new PropertyCondition(
+                    AutomationElement.ControlTypeProperty,
+                    ControlType.Image),
+                new PropertyCondition(
+                    AutomationElement.ControlTypeProperty,
+                    ControlType.Button),
+                new PropertyCondition(
+                    AutomationElement.ControlTypeProperty,
+                    ControlType.Custom));
+            AutomationElementCollection icons;
+            try
+            {
+                icons = sessionItem.FindAll(TreeScope.Descendants, iconConditions);
+            }
+            catch (ElementNotAvailableException)
+            {
+                return false;
+            }
+
+            var maximum = Math.Min(icons.Count, 32);
+            for (var index = 0; index < maximum; index++)
+            {
+                try
+                {
+                    var current = icons[index].Current;
+                    if (LooksLikeMutedVisualMetadata(
+                        current.AutomationId,
+                        current.Name,
+                        current.HelpText,
+                        current.ClassName))
+                    {
+                        return true;
+                    }
+                }
+                catch (ElementNotAvailableException)
+                {
+                    // Continue with the remaining short-lived UIA elements.
+                }
+            }
+            return false;
+        }
+
+        private static bool LooksLikeMutedVisualMetadata(
+            string automationId,
+            string name,
+            string helpText,
+            string className)
+        {
+            var metadata = (automationId ?? string.Empty) + "\n" +
+                (name ?? string.Empty) + "\n" +
+                (helpText ?? string.Empty) + "\n" +
+                (className ?? string.Empty);
+            return metadata.IndexOf("\u6D88\u606F\u514D\u6253\u6270", StringComparison.Ordinal) >= 0 ||
+                   metadata.IndexOf("\u514D\u6253\u6270", StringComparison.Ordinal) >= 0 ||
+                   metadata.IndexOf("\u9759\u97F3", StringComparison.Ordinal) >= 0 ||
+                   metadata.IndexOf("\u52FF\u6270", StringComparison.Ordinal) >= 0 ||
+                   metadata.IndexOf("muted", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   metadata.IndexOf("mute", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   metadata.IndexOf("silent", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   metadata.IndexOf("notification_off", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   metadata.IndexOf("bell_off", StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
         private static List<AutomationElement> FindSessionItems(AutomationElement root)
@@ -419,6 +656,136 @@ namespace WeChatMessageNotifier
             }
 
             return best;
+        }
+
+        private static WeChatPageKind DeterminePageKind(AutomationElement root)
+        {
+            var sessionItems = FindSessionItems(root);
+            var hasBack = FindBackButton(root) != null;
+            var hasService = ContainsStableLabel(root, "服务号", "Service Accounts");
+            if (hasService && hasBack)
+            {
+                return sessionItems.Count > 0
+                    ? WeChatPageKind.ServiceAccountList
+                    : WeChatPageKind.ServiceAccountDetail;
+            }
+            if (hasBack && sessionItems.Count == 0)
+            {
+                return WeChatPageKind.Conversation;
+            }
+            return sessionItems.Count > 0
+                ? WeChatPageKind.MainSessions
+                : WeChatPageKind.Unknown;
+        }
+
+        private static WeChatWindowSnapshot InspectWindow(
+            IntPtr hWnd,
+            AutomationElement root)
+        {
+            Rectangle bounds;
+            NativeMethods.TryGetWindowBounds(hWnd, out bounds);
+            uint processId;
+            NativeMethods.GetWindowThreadProcessId(hWnd, out processId);
+            var sessionCount = FindSessionItems(root).Count;
+            var hasBack = FindBackButton(root) != null;
+            var hasService = ContainsStableLabel(root, "服务号", "Service Accounts");
+            var hasMessages = FindMessagesNavigation(root) != null;
+            var snapshot = new WeChatWindowSnapshot
+            {
+                Handle = hWnd,
+                ProcessId = (int)processId,
+                WindowClass = NativeMethods.ReadClassName(hWnd),
+                Bounds = bounds,
+                IsVisible = NativeMethods.IsWindowVisible(hWnd),
+                IsIconic = NativeMethods.IsIconic(hWnd),
+                IsZoomed = NativeMethods.IsZoomed(hWnd),
+                IsCloaked = NativeMethods.IsWindowCloaked(hWnd),
+                SessionRowCount = sessionCount,
+                HasBackButton = hasBack,
+                HasServiceAccountMarker = hasService,
+                HasNavigationStructure = hasMessages,
+                HasConversationStructure = hasBack,
+                PageKind = DeterminePageKind(root)
+            };
+            var screen = bounds.IsEmpty ? Rectangle.Empty : Screen.FromRectangle(bounds).Bounds;
+            var largeShell = !bounds.IsEmpty &&
+                bounds.Width >= Math.Max(520, screen.Width / 3) &&
+                bounds.Height >= Math.Max(360, screen.Height / 3);
+            // A service-account detail page replaces the session list, but it
+            // remains inside the same maximized main shell. Treat its stable
+            // back-button/service-marker structure as shell evidence rather
+            // than mistaking it for a detached conversation window.
+            var servicePageShell = largeShell && hasBack && hasService;
+            snapshot.MainShellScore = (snapshot.IsVisible ? 100 : 0) +
+                (largeShell ? 80 : 0) +
+                (hasMessages ? 60 : 0) +
+                (sessionCount > 0 ? Math.Min(30, sessionCount) : 0) -
+                (snapshot.IsCloaked ? 200 : 0) -
+                (!largeShell && hasBack ? 80 : 0) +
+                (servicePageShell ? 70 : 0);
+            snapshot.Role = snapshot.IsCloaked || !snapshot.IsVisible
+                ? WeChatWindowRole.Auxiliary
+                : largeShell && (hasMessages || sessionCount > 0 || servicePageShell)
+                    ? WeChatWindowRole.MainShell
+                    : hasBack && !hasMessages
+                        ? WeChatWindowRole.DetachedChat
+                        : WeChatWindowRole.Auxiliary;
+            return snapshot;
+        }
+
+        private static bool ContainsStableLabel(
+            AutomationElement root,
+            string primary,
+            string fallback)
+        {
+            var text = root.FindAll(TreeScope.Descendants,
+                new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Text));
+            foreach (AutomationElement item in text)
+            {
+                try
+                {
+                    var name = item.Current.Name ?? string.Empty;
+                    if (string.Equals(name, primary, StringComparison.Ordinal) ||
+                        string.Equals(name, fallback, StringComparison.OrdinalIgnoreCase))
+                    {
+                        return true;
+                    }
+                }
+                catch (ElementNotAvailableException) { }
+            }
+            return false;
+        }
+
+        internal void LogWindowStructure()
+        {
+            var processIds = new HashSet<uint>(Process.GetProcessesByName("Weixin").Select(
+                delegate(Process process) { return (uint)process.Id; }));
+            NativeMethods.EnumWindows(delegate(IntPtr hWnd, IntPtr ignored)
+            {
+                uint processId;
+                NativeMethods.GetWindowThreadProcessId(hWnd, out processId);
+                if (!processIds.Contains(processId))
+                {
+                    return true;
+                }
+                try
+                {
+                    var root = AutomationElement.FromHandle(hWnd);
+                    if (root == null) return true;
+                    var snapshot = InspectWindow(hWnd, root);
+                    logger.Info("WeChatWindow HWND=" + hWnd.ToInt64().ToString("X") +
+                        " ProcessId=" + snapshot.ProcessId +
+                        " Class=" + snapshot.WindowClass +
+                        " Bounds=" + snapshot.Bounds.Left + "," + snapshot.Bounds.Top + "," + snapshot.Bounds.Width + "x" + snapshot.Bounds.Height +
+                        " Visible=" + snapshot.IsVisible + " Iconic=" + snapshot.IsIconic +
+                        " Zoomed=" + snapshot.IsZoomed + " Cloaked=" + snapshot.IsCloaked +
+                        " SessionRows=" + snapshot.SessionRowCount + " HasNav=" + snapshot.HasNavigationStructure +
+                        " HasBack=" + snapshot.HasBackButton + " HasServiceMarker=" + snapshot.HasServiceAccountMarker +
+                        " WindowRole=" + snapshot.Role + " PageKind=" + snapshot.PageKind);
+                }
+                catch { }
+                return true;
+            }, IntPtr.Zero);
         }
     }
 }

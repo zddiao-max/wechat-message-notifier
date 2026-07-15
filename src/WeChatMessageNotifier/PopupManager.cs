@@ -28,6 +28,10 @@ namespace WeChatMessageNotifier
         private readonly bool userInterfaceEnabled;
         private readonly AvoidanceMotionState avoidanceMotion =
             new AvoidanceMotionState();
+        private readonly PanelAvoidanceState panelAvoidance =
+            new PanelAvoidanceState();
+        private readonly SystemPanelDetector systemPanelDetector =
+            new SystemPanelDetector();
         private PopupHostForm host;
         private Rectangle workingArea = Rectangle.Empty;
         private MotionMode motionMode;
@@ -117,6 +121,11 @@ namespace WeChatMessageNotifier
             get { return host == null ? 0 : host.Bottom; }
         }
 
+        internal double CurrentOffsetXForTest { get { return panelAvoidance.CurrentOffsetX; } }
+        internal double CurrentOffsetYForTest { get { return panelAvoidance.CurrentOffsetY; } }
+        internal double TargetOffsetXForTest { get { return panelAvoidance.TargetOffsetX; } }
+        internal double TargetOffsetYForTest { get { return panelAvoidance.TargetOffsetY; } }
+
         internal bool IsHostVisibleForTest
         {
             get { return host != null && host.Visible; }
@@ -172,6 +181,33 @@ namespace WeChatMessageNotifier
         internal void AdvanceAnimationFrameForTest()
         {
             AdvanceAnimationFrame();
+        }
+
+        internal void SetPanelTargetsForTest(double x, double y)
+        {
+            panelAvoidance.SetTargets(x, y, motionMode);
+        }
+
+        internal void LogSystemPanelStructure(Logger logger)
+        {
+            var snapshot = GetSystemPanelSnapshotForDiagnostic(true);
+            foreach (var line in snapshot.DiagnosticLines)
+            {
+                logger.Info(line);
+            }
+            logger.Info("SystemPanelSnapshot QuickSettingsVisible=" + snapshot.QuickSettingsVisible +
+                " QuickSettingsBounds=" + FormatBounds(snapshot.QuickSettingsBounds) +
+                " NotificationCenterVisible=" + snapshot.NotificationCenterVisible +
+                " NotificationCenterBounds=" + FormatBounds(snapshot.NotificationCenterBounds));
+        }
+
+        internal SystemPanelSnapshot GetSystemPanelSnapshotForDiagnostic(
+            bool includeDiagnostics)
+        {
+            var area = workingArea == Rectangle.Empty
+                ? Screen.PrimaryScreen.WorkingArea
+                : workingArea;
+            return systemPanelDetector.Detect(area, includeDiagnostics);
         }
 
         internal void Show(string contact, string preview)
@@ -263,6 +299,7 @@ namespace WeChatMessageNotifier
 
                 RecalculateLayoutTargets();
                 ApplyAllCardVisuals();
+                host.RefreshCardGeometry();
                 if (!host.Visible)
                 {
                     host.Show();
@@ -333,6 +370,8 @@ namespace WeChatMessageNotifier
                 FinalizeExit(key);
             }
             avoidanceMotion.SnapToTarget();
+            panelAvoidance.SnapToTarget();
+            PositionHost();
             PositionHost();
             animationClock.Stop();
         }
@@ -570,7 +609,18 @@ namespace WeChatMessageNotifier
             var targetChanged = avoidanceMotion.ReportDetection(
                 CalculateAvoidanceOffset(workingArea),
                 motionMode);
-            if (!targetChanged)
+            var panels = systemPanelDetector.Detect(workingArea, false);
+            var panelTargets = CalculatePanelAvoidanceOffsets(panels);
+            var panelTargetChanged = panelAvoidance.SetTargets(
+                panelTargets.X,
+                panelTargets.Y,
+                motionMode);
+            obstructionTimer.Interval =
+                panels.QuickSettingsVisible || panels.NotificationCenterVisible ||
+                !panelAvoidance.IsSettled
+                    ? 80
+                    : ObstructionIntervalMilliseconds;
+            if (!targetChanged && !panelTargetChanged)
             {
                 return;
             }
@@ -587,6 +637,12 @@ namespace WeChatMessageNotifier
         private void AdvanceAnimationFrame()
         {
             var anyAnimating = false;
+            if (!panelAvoidance.IsSettled)
+            {
+                panelAvoidance.Advance(motionMode);
+                PositionHost();
+                anyAnimating = !panelAvoidance.IsSettled;
+            }
             if (!avoidanceMotion.IsSettled)
             {
                 avoidanceMotion.Advance(motionMode);
@@ -616,7 +672,8 @@ namespace WeChatMessageNotifier
 
             if (!anyAnimating &&
                 completedExits.Count == 0 &&
-                !ShouldRunAnimation(states.Values, avoidanceMotion))
+                !ShouldRunAnimation(states.Values, avoidanceMotion) &&
+                panelAvoidance.IsSettled)
             {
                 animationClock.Stop();
             }
@@ -727,6 +784,10 @@ namespace WeChatMessageNotifier
             CompactHostToActiveCards();
             RecalculateLayoutTargets();
             ApplyAllCardVisuals();
+            if (host != null && !host.IsDisposed)
+            {
+                host.RefreshCardGeometry();
+            }
             PositionHost();
         }
 
@@ -772,11 +833,13 @@ namespace WeChatMessageNotifier
             }
 
             var target = new Point(
-                workingArea.Right - host.Width - metrics.ScreenMargin,
+                workingArea.Right - host.Width - metrics.ScreenMargin +
+                (int)Math.Round(panelAvoidance.CurrentOffsetX),
                 workingArea.Bottom -
                 host.Height -
                 metrics.ScreenMargin -
-                (int)Math.Round(avoidanceMotion.Current));
+                (int)Math.Round(avoidanceMotion.Current) +
+                (int)Math.Round(panelAvoidance.CurrentOffsetY));
             if (host.Location != target)
             {
                 host.Location = target;
@@ -820,11 +883,40 @@ namespace WeChatMessageNotifier
             return Math.Max(0, Math.Min(offset, area.Height / 2));
         }
 
+        private Point CalculatePanelAvoidanceOffsets(SystemPanelSnapshot panels)
+        {
+            if (host == null || panels == null)
+            {
+                return Point.Empty;
+            }
+            var defaultBounds = new Rectangle(
+                workingArea.Right - host.Width - metrics.ScreenMargin,
+                workingArea.Bottom - host.Height - metrics.ScreenMargin,
+                host.Width,
+                host.Height);
+            var x = 0;
+            var y = 0;
+            if (panels.QuickSettingsVisible && !panels.QuickSettingsBounds.IsEmpty &&
+                defaultBounds.Right > panels.QuickSettingsBounds.Left &&
+                defaultBounds.Bottom > panels.QuickSettingsBounds.Top)
+            {
+                y = panels.QuickSettingsBounds.Top - metrics.AvoidancePadding - defaultBounds.Bottom;
+            }
+            if (panels.NotificationCenterVisible && !panels.NotificationCenterBounds.IsEmpty &&
+                defaultBounds.Right > panels.NotificationCenterBounds.Left &&
+                defaultBounds.Bottom > panels.NotificationCenterBounds.Top)
+            {
+                x = panels.NotificationCenterBounds.Left - metrics.AvoidancePadding - defaultBounds.Right;
+            }
+            return new Point(Math.Min(0, x), Math.Min(0, y));
+        }
+
         private void StopActiveTimers()
         {
             animationClock.Stop();
             obstructionTimer.Stop();
             avoidanceMotion.Reset();
+            panelAvoidance.Reset();
             headlessHostHeight = metrics.CardHeight;
             workingArea = Rectangle.Empty;
         }
@@ -864,6 +956,13 @@ namespace WeChatMessageNotifier
                 return host.EffectiveVisualMode;
             }
             return PopupVisualMode.Glass;
+        }
+
+        private static string FormatBounds(Rectangle bounds)
+        {
+            return bounds.IsEmpty
+                ? "Empty"
+                : bounds.Left + "," + bounds.Top + "," + bounds.Width + "x" + bounds.Height;
         }
 
         private void RefreshCardVisualMode()
