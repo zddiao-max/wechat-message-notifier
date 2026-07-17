@@ -9,51 +9,22 @@ using System.Text.RegularExpressions;
 
 namespace WeChatMessageNotifier
 {
+    // Stores two deliberately separate session-level rules. Classification
+    // overrides answer "what is this session?"; notification overrides answer
+    // "should this particular session notify?". Neither stores names or text.
     internal sealed class NotificationFilterSettings
     {
-        private static readonly ChatSessionKind[] AllKinds =
-        {
-            ChatSessionKind.DirectContact,
-            ChatSessionKind.OfficialAccount,
-            ChatSessionKind.ServiceAccount,
-            ChatSessionKind.GroupChat,
-            ChatSessionKind.MutedGroupChat,
-            ChatSessionKind.Unknown
-        };
-
         internal NotificationFilterSettings()
         {
-            DirectContact = true;
-            OfficialAccount = true;
-            ServiceAccount = true;
-            GroupChat = true;
-            MutedGroupChat = true;
-            Unknown = true;
-            NotificationDisplayMode = NotificationDisplayMode.WindowsToast;
-            MotionMode = MotionMode.Standard;
-            PopupVisualMode = PopupVisualMode.Glass;
-            SessionKindOverrides =
-                new Dictionary<string, ChatSessionKind>(
+            SessionKindOverrides = new Dictionary<string, ChatSessionKind>(
+                StringComparer.OrdinalIgnoreCase);
+            SessionNotificationOverrides =
+                new Dictionary<string, SessionNotificationOverride>(
                     StringComparer.OrdinalIgnoreCase);
+            ServiceAccountAllowKeywords = new List<string>();
+            OfficialAccountAllowKeywords = new List<string>();
+            GroupChatBlockKeywords = new List<string>();
         }
-
-        internal bool DirectContact { get; set; }
-
-        internal bool OfficialAccount { get; set; }
-
-        internal bool ServiceAccount { get; set; }
-
-        internal bool GroupChat { get; set; }
-
-        internal bool MutedGroupChat { get; set; }
-
-        internal bool Unknown { get; set; }
-
-        internal NotificationDisplayMode NotificationDisplayMode { get; set; }
-
-        internal MotionMode MotionMode { get; set; }
-
-        internal PopupVisualMode PopupVisualMode { get; set; }
 
         internal IDictionary<string, ChatSessionKind> SessionKindOverrides
         {
@@ -61,48 +32,33 @@ namespace WeChatMessageNotifier
             private set;
         }
 
-        internal bool IsEnabled(ChatSessionKind kind)
+        internal IDictionary<string, SessionNotificationOverride>
+            SessionNotificationOverrides
         {
-            switch (kind)
-            {
-                case ChatSessionKind.DirectContact:
-                    return DirectContact;
-                case ChatSessionKind.OfficialAccount:
-                    return OfficialAccount;
-                case ChatSessionKind.ServiceAccount:
-                    return ServiceAccount;
-                case ChatSessionKind.GroupChat:
-                    return GroupChat;
-                case ChatSessionKind.MutedGroupChat:
-                    return MutedGroupChat;
-                default:
-                    return Unknown;
-            }
+            get;
+            private set;
         }
 
-        internal void SetEnabled(ChatSessionKind kind, bool enabled)
+        // Service-account and official-account matches are keyword allowlists.
+        internal IList<string> ServiceAccountAllowKeywords { get; private set; }
+
+        internal IList<string> OfficialAccountAllowKeywords { get; private set; }
+
+        internal IList<string> GroupChatBlockKeywords { get; private set; }
+
+        internal bool HasServiceAccountAllowKeyword(string preview)
         {
-            switch (kind)
-            {
-                case ChatSessionKind.DirectContact:
-                    DirectContact = enabled;
-                    break;
-                case ChatSessionKind.OfficialAccount:
-                    OfficialAccount = enabled;
-                    break;
-                case ChatSessionKind.ServiceAccount:
-                    ServiceAccount = enabled;
-                    break;
-                case ChatSessionKind.GroupChat:
-                    GroupChat = enabled;
-                    break;
-                case ChatSessionKind.MutedGroupChat:
-                    MutedGroupChat = enabled;
-                    break;
-                default:
-                    Unknown = enabled;
-                    break;
-            }
+            return ContainsKeyword(ServiceAccountAllowKeywords, preview);
+        }
+
+        internal bool HasOfficialAccountAllowKeyword(string preview)
+        {
+            return ContainsKeyword(OfficialAccountAllowKeywords, preview);
+        }
+
+        internal bool HasGroupChatBlockKeyword(string contact)
+        {
+            return ContainsKeyword(GroupChatBlockKeywords, contact);
         }
 
         internal ChatSessionKind ResolveKind(
@@ -110,25 +66,35 @@ namespace WeChatMessageNotifier
             ChatSessionKind detectedKind)
         {
             ChatSessionKind overridden;
-            return !string.IsNullOrWhiteSpace(contactHash) &&
-                   SessionKindOverrides.TryGetValue(
-                       contactHash,
-                       out overridden)
+            return TryGetByHash(SessionKindOverrides, contactHash, out overridden)
                 ? overridden
                 : detectedKind;
         }
 
-        internal void SetOverride(
-            string contactHash,
-            ChatSessionKind kind)
+        internal SessionNotificationOverride? ResolveNotificationOverride(
+            string contactHash)
         {
-            if (!IsValidHash(contactHash))
-            {
-                throw new ArgumentException(
-                    "Contact hash must contain 8 to 64 hexadecimal characters.",
-                    "contactHash");
-            }
+            SessionNotificationOverride overridden;
+            return TryGetByHash(
+                SessionNotificationOverrides,
+                contactHash,
+                out overridden)
+                ? (SessionNotificationOverride?)overridden
+                : null;
+        }
+
+        internal void SetOverride(string contactHash, ChatSessionKind kind)
+        {
+            ValidateNewHash(contactHash);
             SessionKindOverrides[contactHash] = kind;
+        }
+
+        internal void SetNotificationOverride(
+            string contactHash,
+            SessionNotificationOverride notificationOverride)
+        {
+            ValidateNewHash(contactHash);
+            SessionNotificationOverrides[contactHash] = notificationOverride;
         }
 
         internal bool ClearOverride(string contactHash)
@@ -136,67 +102,56 @@ namespace WeChatMessageNotifier
             return SessionKindOverrides.Remove(contactHash);
         }
 
+        internal bool ClearNotificationOverride(string contactHash)
+        {
+            return SessionNotificationOverrides.Remove(contactHash);
+        }
+
         internal void ApplyFrom(NotificationFilterSettings source)
         {
-            DirectContact = source.DirectContact;
-            OfficialAccount = source.OfficialAccount;
-            ServiceAccount = source.ServiceAccount;
-            GroupChat = source.GroupChat;
-            MutedGroupChat = source.MutedGroupChat;
-            Unknown = source.Unknown;
-            NotificationDisplayMode = source.NotificationDisplayMode;
-            MotionMode = source.MotionMode;
-            PopupVisualMode = source.PopupVisualMode;
             SessionKindOverrides.Clear();
             foreach (var item in source.SessionKindOverrides)
             {
                 SessionKindOverrides[item.Key] = item.Value;
             }
+
+            SessionNotificationOverrides.Clear();
+            foreach (var item in source.SessionNotificationOverrides)
+            {
+                SessionNotificationOverrides[item.Key] = item.Value;
+            }
+
+            CopyKeywords(source.ServiceAccountAllowKeywords, ServiceAccountAllowKeywords);
+            CopyKeywords(source.OfficialAccountAllowKeywords, OfficialAccountAllowKeywords);
+            CopyKeywords(source.GroupChatBlockKeywords, GroupChatBlockKeywords);
         }
 
         internal string ToJson()
         {
             var builder = new StringBuilder();
             builder.AppendLine("{");
-            for (var index = 0; index < AllKinds.Length; index++)
-            {
-                var kind = AllKinds[index];
-                builder.Append("  \"");
-                builder.Append(GetPropertyName(kind));
-                builder.Append("\": ");
-                builder.Append(IsEnabled(kind) ? "true" : "false");
-                builder.AppendLine(",");
-            }
-
-            builder.Append("  \"notificationDisplayMode\": \"");
-            builder.Append(NotificationDisplayMode);
-            builder.AppendLine("\",");
-            builder.Append("  \"motionMode\": \"");
-            builder.Append(MotionMode);
-            builder.AppendLine("\",");
-            builder.Append("  \"popupVisualMode\": \"");
-            builder.Append(PopupVisualMode);
-            builder.AppendLine("\",");
-            builder.AppendLine("  \"sessionKindOverrides\": {");
-            var overrides = SessionKindOverrides
-                .OrderBy(
-                    delegate(KeyValuePair<string, ChatSessionKind> item)
-                    {
-                        return item.Key;
-                    },
-                    StringComparer.OrdinalIgnoreCase)
-                .ToArray();
-            for (var index = 0; index < overrides.Length; index++)
-            {
-                builder.Append("    \"");
-                builder.Append(overrides[index].Key.ToLowerInvariant());
-                builder.Append("\": \"");
-                builder.Append(overrides[index].Value);
-                builder.Append("\"");
-                builder.AppendLine(
-                    index + 1 < overrides.Length ? "," : string.Empty);
-            }
-            builder.AppendLine("  }");
+            AppendDictionary(builder, "sessionKindOverrides", SessionKindOverrides);
+            builder.AppendLine(",");
+            AppendDictionary(
+                builder,
+                "sessionNotificationOverrides",
+                SessionNotificationOverrides);
+            builder.AppendLine(",");
+            AppendStringArray(
+                builder,
+                "serviceAccountAllowKeywords",
+                ServiceAccountAllowKeywords);
+            builder.AppendLine(",");
+            AppendStringArray(
+                builder,
+                "officialAccountAllowKeywords",
+                OfficialAccountAllowKeywords);
+            builder.AppendLine(",");
+            AppendStringArray(
+                builder,
+                "groupChatBlockKeywords",
+                GroupChatBlockKeywords);
+            builder.AppendLine();
             builder.AppendLine("}");
             return builder.ToString();
         }
@@ -206,170 +161,266 @@ namespace WeChatMessageNotifier
             out NotificationFilterSettings settings)
         {
             settings = null;
-            if (string.IsNullOrWhiteSpace(json))
-            {
-                return false;
-            }
-
+            if (string.IsNullOrWhiteSpace(json)) return false;
             var trimmed = json.Trim();
             if (!trimmed.StartsWith("{", StringComparison.Ordinal) ||
-                !trimmed.EndsWith("}", StringComparison.Ordinal))
+                !trimmed.EndsWith("}", StringComparison.Ordinal)) return false;
+
+            var parsed = new NotificationFilterSettings();
+            if (!TryParseKinds(json, parsed) ||
+                !TryParseNotificationOverrides(json, parsed) ||
+                !TryParseKeywords(
+                    json,
+                    "serviceAccountAllowKeywords",
+                    parsed.ServiceAccountAllowKeywords) ||
+                !TryParseKeywords(
+                    json,
+                    "officialAccountAllowKeywords",
+                    parsed.OfficialAccountAllowKeywords) ||
+                !TryParseKeywords(
+                    json,
+                    "groupChatBlockKeywords",
+                    parsed.GroupChatBlockKeywords))
             {
                 return false;
             }
-
-            var parsed = new NotificationFilterSettings();
-            foreach (var kind in AllKinds)
-            {
-                Match match;
-                if (!TryMatchBoolean(
-                    json,
-                    GetPropertyName(kind),
-                    out match) &&
-                    !TryMatchBoolean(
-                        json,
-                        kind.ToString(),
-                        out match))
-                {
-                    return false;
-                }
-
-                parsed.SetEnabled(
-                    kind,
-                    string.Equals(
-                        match.Groups[1].Value,
-                        "true",
-                        StringComparison.OrdinalIgnoreCase));
-            }
-
-            var displayMatch = Regex.Match(
-                json,
-                "\"notificationDisplayMode\"\\s*:\\s*\"(?<mode>[A-Za-z]+)\"",
-                RegexOptions.IgnoreCase |
-                RegexOptions.CultureInvariant);
-            if (displayMatch.Success)
-            {
-                NotificationDisplayMode mode;
-                if (!Enum.TryParse(
-                        displayMatch.Groups["mode"].Value,
-                        true,
-                        out mode) ||
-                    !Enum.IsDefined(typeof(NotificationDisplayMode), mode))
-                {
-                    return false;
-                }
-                parsed.NotificationDisplayMode = mode;
-            }
-
-            var motionMatch = Regex.Match(
-                json,
-                "\"motionMode\"\\s*:\\s*\"(?<mode>[A-Za-z]+)\"",
-                RegexOptions.IgnoreCase |
-                RegexOptions.CultureInvariant);
-            if (motionMatch.Success)
-            {
-                MotionMode mode;
-                if (!Enum.TryParse(
-                        motionMatch.Groups["mode"].Value,
-                        true,
-                        out mode) ||
-                    !Enum.IsDefined(typeof(MotionMode), mode))
-                {
-                    return false;
-                }
-                parsed.MotionMode = mode;
-            }
-
-            var visualMatch = Regex.Match(
-                json,
-                "\"popupVisualMode\"\\s*:\\s*\"(?<mode>[A-Za-z]+)\"",
-                RegexOptions.IgnoreCase |
-                RegexOptions.CultureInvariant);
-            if (visualMatch.Success)
-            {
-                PopupVisualMode mode;
-                if (!Enum.TryParse(
-                        visualMatch.Groups["mode"].Value,
-                        true,
-                        out mode) ||
-                    !Enum.IsDefined(typeof(PopupVisualMode), mode))
-                {
-                    return false;
-                }
-                parsed.PopupVisualMode = mode;
-            }
-
-            var overridesMatch = Regex.Match(
-                json,
-                "\"sessionKindOverrides\"\\s*:\\s*\\{(?<body>[^}]*)\\}",
-                RegexOptions.IgnoreCase |
-                RegexOptions.CultureInvariant |
-                RegexOptions.Singleline);
-            if (overridesMatch.Success)
-            {
-                var pairMatches = Regex.Matches(
-                    overridesMatch.Groups["body"].Value,
-                    "\"(?<hash>[0-9a-fA-F]{8,64})\"\\s*:\\s*\"(?<kind>[A-Za-z]+)\"",
-                    RegexOptions.CultureInvariant);
-                foreach (Match pair in pairMatches)
-                {
-                    ChatSessionKind kind;
-                    if (!Enum.TryParse(
-                            pair.Groups["kind"].Value,
-                            true,
-                            out kind) ||
-                        !Enum.IsDefined(typeof(ChatSessionKind), kind))
-                    {
-                        return false;
-                    }
-                    parsed.SetOverride(pair.Groups["hash"].Value, kind);
-                }
-            }
-
             settings = parsed;
             return true;
         }
 
-        private static bool TryMatchBoolean(
+        private static bool TryParseKinds(
+            string json,
+            NotificationFilterSettings parsed)
+        {
+            string body;
+            if (!TryGetObjectBody(json, "sessionKindOverrides", out body))
+            {
+                return true;
+            }
+
+            var pairs = Regex.Matches(
+                body,
+                "\"(?<hash>[0-9a-fA-F]{8,64})\"\\s*:\\s*\"(?<kind>[A-Za-z]+)\"",
+                RegexOptions.CultureInvariant);
+            foreach (Match pair in pairs)
+            {
+                ChatSessionKind kind;
+                if (Enum.TryParse(pair.Groups["kind"].Value, true, out kind) &&
+                    Enum.IsDefined(typeof(ChatSessionKind), kind))
+                {
+                    // Eight-character keys are read for backward compatibility.
+                    parsed.SessionKindOverrides[pair.Groups["hash"].Value] = kind;
+                }
+            }
+            return true;
+        }
+
+        private static bool TryParseNotificationOverrides(
+            string json,
+            NotificationFilterSettings parsed)
+        {
+            string body;
+            if (!TryGetObjectBody(json, "sessionNotificationOverrides", out body))
+            {
+                return true;
+            }
+
+            var pairs = Regex.Matches(
+                body,
+                "\"(?<hash>[0-9a-fA-F]{8,64})\"\\s*:\\s*\"(?<policy>[A-Za-z]+)\"",
+                RegexOptions.CultureInvariant);
+            foreach (Match pair in pairs)
+            {
+                SessionNotificationOverride notificationOverride;
+                if (!Enum.TryParse(
+                    pair.Groups["policy"].Value,
+                    true,
+                    out notificationOverride) ||
+                    !Enum.IsDefined(
+                        typeof(SessionNotificationOverride),
+                        notificationOverride))
+                {
+                    return false;
+                }
+                parsed.SessionNotificationOverrides[pair.Groups["hash"].Value] =
+                    notificationOverride;
+            }
+            return true;
+        }
+
+        private static bool TryGetObjectBody(
             string json,
             string propertyName,
-            out Match match)
+            out string body)
         {
-            match = Regex.Match(
+            var match = Regex.Match(
                 json,
                 "\"" + Regex.Escape(propertyName) +
-                "\"\\s*:\\s*(true|false)",
-                RegexOptions.IgnoreCase |
-                RegexOptions.CultureInvariant);
+                "\"\\s*:\\s*\\{(?<body>[^}]*)\\}",
+                RegexOptions.IgnoreCase | RegexOptions.CultureInvariant |
+                RegexOptions.Singleline);
+            body = match.Success ? match.Groups["body"].Value : null;
             return match.Success;
         }
 
-        private static string GetPropertyName(ChatSessionKind kind)
+        private static bool TryParseKeywords(
+            string json,
+            string propertyName,
+            IList<string> destination)
         {
-            switch (kind)
+            var match = Regex.Match(
+                json,
+                "\"" + Regex.Escape(propertyName) +
+                "\"\\s*:\\s*\\[(?<body>[^]]*)\\]",
+                RegexOptions.IgnoreCase | RegexOptions.CultureInvariant |
+                RegexOptions.Singleline);
+            if (!match.Success)
             {
-                case ChatSessionKind.DirectContact:
-                    return "enableDirectContact";
-                case ChatSessionKind.OfficialAccount:
-                    return "enableOfficialAccount";
-                case ChatSessionKind.ServiceAccount:
-                    return "enableServiceAccount";
-                case ChatSessionKind.GroupChat:
-                    return "enableGroupChat";
-                case ChatSessionKind.MutedGroupChat:
-                    return "enableMutedGroupChat";
-                default:
-                    return "enableUnknown";
+                // Missing keyword settings are valid for existing files.
+                return json.IndexOf("\"" + propertyName + "\"", StringComparison.OrdinalIgnoreCase) < 0;
+            }
+
+            var values = Regex.Matches(
+                match.Groups["body"].Value,
+                "\"(?<value>(?:\\\\.|[^\"])*)\"",
+                RegexOptions.CultureInvariant);
+            foreach (Match value in values)
+            {
+                AddKeyword(destination, UnescapeJson(value.Groups["value"].Value));
+            }
+            return true;
+        }
+
+        private static void AppendDictionary<TValue>(
+            StringBuilder builder,
+            string propertyName,
+            IDictionary<string, TValue> source)
+        {
+            builder.Append("  \"");
+            builder.Append(propertyName);
+            builder.AppendLine("\": {");
+            var values = source.OrderBy(
+                delegate(KeyValuePair<string, TValue> item) { return item.Key; },
+                StringComparer.OrdinalIgnoreCase).ToArray();
+            for (var index = 0; index < values.Length; index++)
+            {
+                builder.Append("    \"");
+                builder.Append(values[index].Key.ToLowerInvariant());
+                builder.Append("\": \"");
+                builder.Append(values[index].Value);
+                builder.Append("\"");
+                builder.AppendLine(index + 1 < values.Length ? "," : string.Empty);
+            }
+            builder.Append("  }");
+        }
+
+        private static void AppendStringArray(
+            StringBuilder builder,
+            string propertyName,
+            IEnumerable<string> values)
+        {
+            builder.Append("  \"");
+            builder.Append(propertyName);
+            builder.AppendLine("\": [");
+            var normalized = values
+                .Where(delegate(string value) { return !string.IsNullOrWhiteSpace(value); })
+                .Select(delegate(string value) { return value.Trim(); })
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(delegate(string value) { return value; }, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            for (var index = 0; index < normalized.Length; index++)
+            {
+                builder.Append("    \"");
+                builder.Append(EscapeJson(normalized[index]));
+                builder.Append("\"");
+                builder.AppendLine(index + 1 < normalized.Length ? "," : string.Empty);
+            }
+            builder.Append("  ]");
+        }
+
+        private static bool ContainsKeyword(
+            IEnumerable<string> keywords,
+            string preview)
+        {
+            if (string.IsNullOrEmpty(preview)) return false;
+            foreach (var keyword in keywords)
+            {
+                if (!string.IsNullOrWhiteSpace(keyword) &&
+                    preview.IndexOf(keyword.Trim(), StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        private static void CopyKeywords(
+            IEnumerable<string> source,
+            IList<string> destination)
+        {
+            destination.Clear();
+            foreach (var value in source)
+            {
+                AddKeyword(destination, value);
             }
         }
 
-        private static bool IsValidHash(string value)
+        private static void AddKeyword(IList<string> destination, string value)
         {
-            return !string.IsNullOrWhiteSpace(value) &&
-                   Regex.IsMatch(
-                       value,
-                       "^[0-9a-fA-F]{8,64}$",
-                       RegexOptions.CultureInvariant);
+            if (string.IsNullOrWhiteSpace(value)) return;
+            var trimmed = value.Trim();
+            foreach (var existing in destination)
+            {
+                if (string.Equals(existing, trimmed, StringComparison.OrdinalIgnoreCase)) return;
+            }
+            destination.Add(trimmed);
+        }
+
+        private static string EscapeJson(string value)
+        {
+            return value.Replace("\\", "\\\\").Replace("\"", "\\\"");
+        }
+
+        private static string UnescapeJson(string value)
+        {
+            return value.Replace("\\\"", "\"").Replace("\\\\", "\\");
+        }
+
+        private static bool TryGetByHash<TValue>(
+            IDictionary<string, TValue> source,
+            string contactHash,
+            out TValue value)
+        {
+            if (!string.IsNullOrWhiteSpace(contactHash) &&
+                source.TryGetValue(contactHash, out value))
+            {
+                return true;
+            }
+
+            // Older settings used 32-bit hashes. Read these keys only as a
+            // compatibility fallback; newly created entries require 16 hex.
+            if (!string.IsNullOrWhiteSpace(contactHash) &&
+                contactHash.Length >= 16 &&
+                source.TryGetValue(contactHash.Substring(0, 8), out value))
+            {
+                return true;
+            }
+
+            value = default(TValue);
+            return false;
+        }
+
+        private static void ValidateNewHash(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value) || !Regex.IsMatch(
+                value,
+                "^[0-9a-fA-F]{16,64}$",
+                RegexOptions.CultureInvariant))
+            {
+                throw new ArgumentException(
+                    "Contact hash must contain 16 to 64 hexadecimal characters.",
+                    "contactHash");
+            }
         }
     }
 }

@@ -3,12 +3,9 @@
 
 namespace WeChatMessageNotifier
 {
-    internal enum ChatSessionKind
+    internal enum SessionNotificationOverride
     {
-        DirectContact,
-        OfficialAccount,
-        ServiceAccount,
-        GroupChat,
-        Unknown
+        Allow,
+        Block
     }
 }

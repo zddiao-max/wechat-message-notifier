@@ -23,13 +23,6 @@ namespace WeChatMessageNotifier
             new Dictionary<ChatSessionKind, int>();
         private readonly Dictionary<string, SessionNavigationInfo> navigationCatalog =
             new Dictionary<string, SessionNavigationInfo>(StringComparer.Ordinal);
-        // The crossed-bell is exposed as a descendant UIA element rather than
-        // text on the row. Walking every descendant is comparatively costly,
-        // so retain the visual result briefly between normal session polls.
-        private readonly Dictionary<string, MutedMarkerCacheEntry> mutedMarkerCache =
-            new Dictionary<string, MutedMarkerCacheEntry>(StringComparer.Ordinal);
-        private static readonly TimeSpan MutedMarkerCacheLifetime =
-            TimeSpan.FromSeconds(8);
         private IntPtr mainWindow;
         private DateTime lastWindowSearch = DateTime.MinValue;
 
@@ -51,8 +44,6 @@ namespace WeChatMessageNotifier
         internal int LastSessionCount { get; private set; }
 
         internal int LastSelectedSessionCount { get; private set; }
-
-        internal int LastMutedSessionCount { get; private set; }
 
         internal int LastGroupMarkerCount { get; private set; }
 
@@ -126,17 +117,7 @@ namespace WeChatMessageNotifier
                         automationId);
                     if (session != null)
                     {
-                        // Only group candidates can be a muted group. This
-                        // avoids recursive UIA icon scans for ordinary chats.
-                        if (session.HasGroupMarker && GetMutedVisualMarker(
-                            rawItems[index], session.SessionKey, DateTime.UtcNow))
-                        {
-                            session = SessionParser.Parse(
-                                name,
-                                index,
-                                automationId,
-                                true);
-                        }
+                        ApplySourcePageClassification(session, sourcePageKind);
                         navigationCatalog[session.SessionKey] =
                             new SessionNavigationInfo
                             {
@@ -168,8 +149,6 @@ namespace WeChatMessageNotifier
                 LastSessionCount = sessions.Count;
                 LastSelectedSessionCount = sessions.Count(
                     delegate(ChatSession session) { return session.IsSelected; });
-                LastMutedSessionCount = sessions.Count(
-                    delegate(ChatSession session) { return session.IsMuted; });
                 LastGroupMarkerCount = sessions.Count(
                     delegate(ChatSession session)
                     {
@@ -556,108 +535,6 @@ namespace WeChatMessageNotifier
             return false;
         }
 
-        // The crossed-bell shown by WeChat 4.x is frequently a separate icon
-        // control, not text included in the ListItem name.  Probe only
-        // non-text icon-like descendants; no contact name or message preview
-        // is logged or persisted by this check.
-        private static bool HasMutedVisualMarker(AutomationElement sessionItem)
-        {
-            if (sessionItem == null)
-            {
-                return false;
-            }
-
-            var iconConditions = new OrCondition(
-                new PropertyCondition(
-                    AutomationElement.ControlTypeProperty,
-                    ControlType.Image),
-                new PropertyCondition(
-                    AutomationElement.ControlTypeProperty,
-                    ControlType.Button),
-                new PropertyCondition(
-                    AutomationElement.ControlTypeProperty,
-                    ControlType.Custom));
-            AutomationElementCollection icons;
-            try
-            {
-                icons = sessionItem.FindAll(TreeScope.Descendants, iconConditions);
-            }
-            catch (ElementNotAvailableException)
-            {
-                return false;
-            }
-
-            var maximum = Math.Min(icons.Count, 32);
-            for (var index = 0; index < maximum; index++)
-            {
-                try
-                {
-                    var current = icons[index].Current;
-                    if (LooksLikeMutedVisualMetadata(
-                        current.AutomationId,
-                        current.Name,
-                        current.HelpText,
-                        current.ClassName))
-                    {
-                        return true;
-                    }
-                }
-                catch (ElementNotAvailableException)
-                {
-                    // Continue with the remaining short-lived UIA elements.
-                }
-            }
-            return false;
-        }
-
-        private bool GetMutedVisualMarker(
-            AutomationElement sessionItem,
-            string sessionKey,
-            DateTime now)
-        {
-            MutedMarkerCacheEntry cached;
-            if (mutedMarkerCache.TryGetValue(sessionKey, out cached) &&
-                now - cached.CheckedAtUtc < MutedMarkerCacheLifetime)
-            {
-                return cached.HasMutedVisualMarker;
-            }
-
-            var hasMutedVisualMarker = HasMutedVisualMarker(sessionItem);
-            mutedMarkerCache[sessionKey] = new MutedMarkerCacheEntry
-            {
-                CheckedAtUtc = now,
-                HasMutedVisualMarker = hasMutedVisualMarker
-            };
-            return hasMutedVisualMarker;
-        }
-
-        private sealed class MutedMarkerCacheEntry
-        {
-            internal DateTime CheckedAtUtc { get; set; }
-            internal bool HasMutedVisualMarker { get; set; }
-        }
-
-        private static bool LooksLikeMutedVisualMetadata(
-            string automationId,
-            string name,
-            string helpText,
-            string className)
-        {
-            var metadata = (automationId ?? string.Empty) + "\n" +
-                (name ?? string.Empty) + "\n" +
-                (helpText ?? string.Empty) + "\n" +
-                (className ?? string.Empty);
-            return metadata.IndexOf("\u6D88\u606F\u514D\u6253\u6270", StringComparison.Ordinal) >= 0 ||
-                   metadata.IndexOf("\u514D\u6253\u6270", StringComparison.Ordinal) >= 0 ||
-                   metadata.IndexOf("\u9759\u97F3", StringComparison.Ordinal) >= 0 ||
-                   metadata.IndexOf("\u52FF\u6270", StringComparison.Ordinal) >= 0 ||
-                   metadata.IndexOf("muted", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                   metadata.IndexOf("mute", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                   metadata.IndexOf("silent", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                   metadata.IndexOf("notification_off", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                   metadata.IndexOf("bell_off", StringComparison.OrdinalIgnoreCase) >= 0;
-        }
-
         private static List<AutomationElement> FindSessionItems(AutomationElement root)
         {
             var lists = root.FindAll(
@@ -704,6 +581,22 @@ namespace WeChatMessageNotifier
             }
 
             return best;
+        }
+
+        // The service-account subpage often omits the label on each concrete
+        // row. Its page context is stable evidence, unlike a display name.
+        internal static void ApplySourcePageClassification(
+            ChatSession session,
+            WeChatPageKind sourcePageKind)
+        {
+            if (session == null ||
+                sourcePageKind != WeChatPageKind.ServiceAccountList)
+            {
+                return;
+            }
+
+            session.DetectedKind = ChatSessionKind.ServiceAccount;
+            session.Kind = ChatSessionKind.ServiceAccount;
         }
 
         private static WeChatPageKind DeterminePageKind(AutomationElement root)

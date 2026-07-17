@@ -16,14 +16,11 @@ namespace WeChatMessageNotifier
         internal bool IsSelected { get; set; }
         internal ChatSessionKind Kind { get; set; }
         internal ChatSessionKind DetectedKind { get; set; }
-        internal bool IsMuted { get; set; }
         internal string ContactHash { get; set; }
         internal int RawLineCount { get; set; }
         internal bool HasServiceLabel { get; set; }
         internal bool HasOfficialLabel { get; set; }
         internal bool HasOfficialMarker { get; set; }
-        internal bool HasMutedLabel { get; set; }
-        internal bool HasMutedVisualMarker { get; set; }
         internal bool HasGroupMarker { get; set; }
     }
 }

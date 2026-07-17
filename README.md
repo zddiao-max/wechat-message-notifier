@@ -1,194 +1,74 @@
 # WeChat Message Notifier
 
-一个适用于 Windows 微信 4.x 的本地开源消息提醒器。
+适用于 Windows 微信 4.x 的本地消息提醒器。当前版本：**2.6.0**。
 
-当前版本：**2.5.1**
+程序从微信公开的 Windows UI Automation 会话列表读取联系人、消息摘要和未读状态，并仅使用 Windows 系统通知横幅和通知中心提醒。
 
-> v2.5.1 已从运行路径删除旧的自定义弹窗、动画、毛玻璃和系统面板避让功能；程序只使用 Windows 系统横幅与通知中心。为降低清理风险，旧弹窗源码暂时保留在仓库中，不会被实例化或运行，后续会单独删除。
+## 通知规则
 
-微信有新消息时，程序从微信公开的 Windows UI Automation 会话列表中读取联系人、消息摘要和时间，并默认使用 Windows 系统通知横幅提醒；通知会进入 Windows 通知中心。点击通知可打开微信，并尽量跳转到对应会话。
+- 普通联系人和 `Unknown` 会话默认提醒；可按会话单独设为 `Block`。
+- 群聊默认提醒；可按会话单独设为 `Block`。
+- `groupChatBlockKeywords` 匹配群聊名称：命中任一词的已识别群聊强制不提醒，优先于该群的 `Allow` 规则。
+- 公众号、订阅号以及被识别为 `OfficialAccount` 的会话默认不提醒；仅当消息摘要命中公众号允许关键词时提醒。
+- 服务号默认不提醒；按会话明确设为 `Allow`，或消息摘要命中服务号允许关键词时提醒。
+- `serviceAccountAllowKeywords` 是服务号消息摘要的允许关键词：命中任一关键词时推送。
+- `officialAccountAllowKeywords` 是公众号消息摘要的允许关键词：公众号仅在命中任一关键词时推送。
+- 不再识别或区分“免打扰群聊”。不会读取截图、图像、像素、坐标或铃铛图标。
+- 所有分类与规则的键均为匿名 `ContactHash`，不会写入联系人名称或消息正文。
 
-> 初始代码与文档由 **OpenAI Codex** 于 2026-06-29 根据项目所有者的需求编写，并在实际 Windows 微信 4.1.11 环境中完成测试。
+`sessionKindOverrides` 只用于修正“它是什么类型”；`sessionNotificationOverrides` 只用于决定“这个具体会话是否提醒”。两者互不替代。
 
-## 功能
-
-- 完全本地运行，不联网、不调用 AI API、Token 消耗为零。
-- 不读取或修改微信数据库，不注入微信进程。
-- 微信收到新消息时通过 Windows 系统通知显示联系人和消息摘要。
-- 默认使用 Windows 系统通知横幅，不再创建自定义 WinForms 弹窗、动画 Timer 或遮挡避让窗口。
-- 微信处于前台时仍会提醒，避免点击上一条消息后漏掉其他会话的新消息。
-- 微信前台当前 selected 会话在未读数未增加时，仅摘要变化不会提醒，避免本人发送消息误触发。
-- 使用微信会话 AutomationId 和未读数量识别新消息，忽略时间文本及短暂不完整扫描造成的重复提醒。
-- 同一联系人和摘要在 5 分钟内只提醒一次，防止未读计数回跳造成二次提醒。
-- 系统通知横幅停留时间由 Windows 统一控制；通知中心记录继续保留，用户可手动清除。
-- 同一联系人连续发消息时，系统通知使用稳定 tag/group 更新同一条联系人通知，并显示累计新消息数量。
-- 点击系统通知会打开微信，并尽量跳转到对应联系人、群聊、公众号或服务号会话；成功定位后清除该会话的通知计数和通知中心记录。
-- 清空通知中心历史后，下一条记录从新的序列开始，不沿用清空前的累计数量。
-- 托盘“发送测试通知”会发送 Windows 系统通知横幅。
-- 托盘提供“打开 Windows 通知时长设置”，可跳转到系统全局通知横幅停留时间设置。
-- 打开微信时保留原窗口状态，最大化窗口不会被还原为普通窗口。
-- 支持隐私模式，只显示联系人，不显示消息内容。
-- 支持托盘暂停、测试通知和查看日志。
-- 托盘“提醒类型”子菜单可分别控制普通联系人、公众号、服务号、普通群聊、免打扰群聊和未知类型。
-- 托盘“诊断”可记录下一条候选消息的脱敏分类信息，并打开设置文件或日志。
-- 支持当前用户登录 Windows 后自动启动。
-
-## 隐私设计
-
-- 消息正文和联系人不会写入日志。
-- 日志只记录时间、程序状态、字段长度和错误类型。
-- 程序不会发送微信消息。
-- 程序不会访问网络。
-- Windows 通知中心记录由本机系统保存，用户可在通知中心手动清除。
-
-默认日志位置：
-
-```text
-%LOCALAPPDATA%\WeChatMessageNotifier\app.log
+```json
+{
+  "sessionKindOverrides": {
+    "a1b2c3d4e5f60708": "ServiceAccount",
+    "1020304050607080": "GroupChat"
+  },
+  "sessionNotificationOverrides": {
+    "a1b2c3d4e5f60708": "Allow",
+    "1020304050607080": "Block"
+  },
+  "serviceAccountAllowKeywords": [
+    "AA"
+  ],
+  "officialAccountAllowKeywords": [
+    "AA",
+    "AB"
+  ],
+  "groupChatBlockKeywords": [
+    "团购",
+    "福利"
+  }
+}
 ```
 
-单个日志达到 1 MB 时自动轮转，最多保留 `app.log.1` 至 `app.log.3` 三份历史日志。
-
-提醒类型开关保存在：
+配置文件在：
 
 ```text
 %LOCALAPPDATA%\WeChatMessageNotifier\settings.json
 ```
 
-该文件包含提醒类型开关和可选的会话哈希类型覆盖，不保存联系人或消息内容；文件损坏时自动使用默认值。
+配置修改会自动热加载。新规则使用 16 位十六进制 `ContactHash`；为兼容旧配置，已有的 8 位哈希仍可读取。保存使用 UTF-8 无 BOM。旧的 `enable*` 全局类型开关会被忽略，并在下次保存时移除。
 
-```json
-{
-  "enableDirectContact": true,
-  "enableOfficialAccount": false,
-  "enableServiceAccount": true,
-  "enableGroupChat": true,
-  "enableMutedGroupChat": false,
-  "enableUnknown": true,
-  "notificationDisplayMode": "WindowsToast",
-  "sessionKindOverrides": {
-    "a1b2c3d4": "MutedGroupChat"
-  }
-}
-```
+## 诊断与隐私
 
-`notificationDisplayMode` 在 v2.5.1 固定为 `WindowsToast`。旧的 `CustomPopup` 设置会在启动时自动迁移为 Windows 系统通知；托盘不再提供自定义弹窗切换。
+托盘菜单可：暂停监控、启用隐私模式、发送测试通知、打开 Windows 通知时长设置，以及在“诊断”菜单中记录下一条候选消息的脱敏分类结果、打开设置或日志、记录微信窗口结构。
 
-`motionMode` 和 `popupVisualMode` 是旧自定义弹窗遗留设置；v2.5.1 运行时不再使用它们。系统横幅的显示效果和停留时长由 Windows 通知设置统一控制。
+诊断日志只含 `ContactHash`、检测类型、解析后类型、会话级规则、默认策略、结果和原因；不记录联系人名称或消息正文。
 
-诊断日志会给出不含明文的 `ContactHash`。可用该哈希手动覆盖 UIA 无法稳定识别的会话类型；保存文件后程序会自动重新加载。
+程序完全本地运行：不联网、不调用 AI API、不读取或修改微信数据库、不注入微信进程。
 
-## 性能消耗
-
-- 微信会话列表每 1.5 秒只读检查一次。
-- 不创建自定义弹窗、60 FPS 动画、遮挡检测或系统面板扫描定时器。
-- 完全本地运行，不访问网络，不调用 AI API，不消耗 Token。
-- 日志最多约占 4 MB：当前日志 1 MB，加 3 份轮转历史。
-
-本机 Windows 11、16 逻辑处理器环境下的 10 秒采样结果：
-
-| 状态 | 平均 CPU | 工作集内存 | 私有内存 |
-| --- | ---: | ---: | ---: |
-| 普通后台运行 | 约 0.13% | 约 66 MB | 约 42 MB |
-| Windows 系统通知显示期间 | 由 Windows 通知服务负责 | 近似普通后台运行 | 近似普通后台运行 |
-
-数据会受到微信会话数量、其他置顶窗口和系统状态影响，仅代表本机实测，不是所有设备的固定值。
-
-## 系统要求
-
-- Windows 10 或 Windows 11。
-- Windows 微信 4.x。
-- .NET Framework 4.x（现代 Windows 通常已内置）。
-
-当前已验证环境：
-
-- Windows 11
-- 微信 4.1.11.24
-
-## 构建
-
-项目有意不依赖 NuGet 包，可直接使用 Windows 自带的 .NET Framework C# 编译器。
+## 构建与测试
 
 ```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\test.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\build.ps1
 ```
 
-生成文件：
+构建产物：
 
 ```text
 outputs\WeChatMessageNotifier\WeChatMessageNotifier.exe
 ```
 
-## 测试
-
-运行解析、去重和过滤测试：
-
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\test.ps1
-```
-
-对当前运行的微信执行只读集成检查：
-
-```powershell
-.\work\tests\WeChatMessageNotifier.Tests.exe --integration-test
-```
-
-集成测试只输出识别到的会话数量，不输出联系人或消息内容。
-
-## 使用
-
-1. 保持微信已登录。
-2. 运行 `WeChatMessageNotifier.exe`。
-3. 第一次扫描只建立基线，不会把已有消息全部弹出。
-4. 右键托盘图标可暂停监控、启用隐私模式、测试通知或退出。
-5. 点击消息提醒可打开微信并跳转到对应的一级会话。
-
-命令行参数：
-
-```text
---privacy            启动时只显示联系人。
---suppress-foreground  微信在前台时不显示提醒（可选的安静模式）。
---notify-foreground    兼容旧启动配置；保持微信前台提醒。
---self-test          运行内置测试并退出。
---integration-test   只读检查微信会话列表并退出。
-```
-
-## 工作原理
-
-1. 枚举 `Weixin.exe` 的顶层 Qt 窗口。
-2. 通过 Windows UI Automation 找到包含多行项目的会话列表。
-3. 从每个列表项解析联系人、摘要和时间。
-4. 未读数可用时优先根据未读增量判断；无未读数时使用内容签名，并过滤本人发送摘要。
-5. 读取会话行的 selected 状态，抑制微信前台当前会话没有未读增加的纯摘要变化。
-6. 在产生系统通知前应用提醒类型开关。
-7. 使用稳定 tag/group 将同一会话的连续消息聚合为一条 Windows 系统通知。
-8. 点击通知时匹配会话列表项并切换微信聊天内容；成功后清除该会话的聚合状态与通知中心记录。
-
-## 已知限制
-
-- 只能识别微信当前已加载到会话列表中的项目。
-- 微信大版本更新若改变辅助功能结构，解析规则可能需要更新。
-- 微信未运行、未登录或完全退出时无法监控。
-- 图片、语音等消息只显示微信会话列表提供的摘要。
-- 相同显示名称的联系人可能被视作同一个会话。
-- 服务号、公众号依赖 UIA 的明确分类标签；群聊优先依赖 `@chatroom` 或“群聊”结构标签。微信未暴露这些证据时归为 `Unknown`，可通过脱敏哈希手动覆盖。
-- Windows 通知中心功能依赖系统通知权限；若用户关闭该应用的系统通知，历史记录和兜底横幅将不可用。
-
-## 项目结构
-
-```text
-src/WeChatMessageNotifier/       主程序
-src/WeChatNotifier.Probe/        脱敏结构探针
-build.ps1                        构建脚本
-test.ps1                         测试脚本
-build-probe.ps1                  探针构建脚本
-outputs/                         本地构建产物
-```
-
-## 署名
-
-本项目初始实现由 **OpenAI Codex** 编写，项目所有者负责提出需求、授权本机测试并确认交互行为。
-
-## 许可证
-
-本项目以 [MIT License](LICENSE) 开源，允许使用、修改和再分发，但须保留版权与许可声明。
+初始代码与文档由 OpenAI Codex 于 2026-06-29 在项目所有者指示下编写。

@@ -5,330 +5,46 @@ using System;
 using System.Drawing;
 using System.Runtime.InteropServices;
 using System.Text;
-using System.Windows.Forms;
 
 namespace WeChatMessageNotifier
 {
+    // Win32 calls needed by read-only WeChat window discovery and activation.
+    // Popup placement, backdrop, acrylic and occlusion APIs were removed.
     internal static class NativeMethods
     {
-        // This file contains the small Win32 surface required for window
-        // discovery, activation, topmost placement, and occlusion detection.
         internal delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
-
         internal const int SwRestore = 9;
         internal const int SwShow = 5;
         internal const int SwShowMaximized = 3;
-        internal static readonly IntPtr HwndTopmost = new IntPtr(-1);
-        internal const uint SwpNoSize = 0x0001;
-        internal const uint SwpNoMove = 0x0002;
-        internal const uint SwpNoActivate = 0x0010;
-        internal const uint SwpShowWindow = 0x0040;
-        private const int GwlExStyle = -20;
-        private const int WsExTopmost = 0x00000008;
-        private const int DwmwaWindowCornerPreference = 33;
-        private const int DwmwaSystemBackdropType = 38;
         private const int DwmwaCloaked = 14;
-        private const int DwmwaBorderColor = 34;
-        private const int DwmwcpRound = 2;
-        private const int DwmsbtMainWindow = 2;
-        private const int DwmsbtTransientWindow = 3;
-        private const int DwmsbtTabbedWindow = 4;
-        private const int WcaAccentPolicy = 19;
-        private const uint WmLeftButtonDown = 0x0201;
-        private const uint WmLeftButtonUp = 0x0202;
-        private static readonly IntPtr MkLeftButton = new IntPtr(0x0001);
 
         [DllImport("user32.dll")]
         internal static extern bool EnumWindows(EnumWindowsProc callback, IntPtr lParam);
-
-        [DllImport("user32.dll")]
-        internal static extern bool EnumChildWindows(
-            IntPtr parent,
-            EnumWindowsProc callback,
-            IntPtr lParam);
-
         [DllImport("user32.dll")]
         internal static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
-
         [DllImport("user32.dll")]
         internal static extern bool IsWindow(IntPtr hWnd);
-
         [DllImport("user32.dll")]
         internal static extern bool IsWindowVisible(IntPtr hWnd);
-
         [DllImport("user32.dll")]
         internal static extern bool IsIconic(IntPtr hWnd);
-
         [DllImport("user32.dll")]
         internal static extern bool IsZoomed(IntPtr hWnd);
-
         [DllImport("user32.dll")]
         internal static extern IntPtr GetForegroundWindow();
-
         [DllImport("user32.dll")]
         internal static extern bool ShowWindow(IntPtr hWnd, int command);
-
         [DllImport("user32.dll")]
         internal static extern bool SetForegroundWindow(IntPtr hWnd);
-
         [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
-        internal static extern int SetCurrentProcessExplicitAppUserModelID(
-            string appId);
-
-        [DllImport("user32.dll")]
-        internal static extern bool SetWindowPos(
-            IntPtr hWnd,
-            IntPtr insertAfter,
-            int x,
-            int y,
-            int width,
-            int height,
-            uint flags);
-
-        [DllImport("user32.dll")]
-        private static extern int GetWindowLong(IntPtr hWnd, int index);
-
-        [DllImport("user32.dll")]
-        private static extern bool GetWindowRect(IntPtr hWnd, out NativeRect rect);
-
-        [DllImport("user32.dll")]
-        private static extern bool ScreenToClient(
-            IntPtr hWnd,
-            ref NativePoint point);
-
-        [DllImport("user32.dll", SetLastError = true)]
-        private static extern bool PostMessage(
-            IntPtr hWnd,
-            uint message,
-            IntPtr wParam,
-            IntPtr lParam);
-
+        internal static extern int SetCurrentProcessExplicitAppUserModelID(string appId);
         [DllImport("user32.dll", CharSet = CharSet.Unicode)]
         internal static extern int GetClassName(IntPtr hWnd, StringBuilder className, int maxCount);
-
-        [DllImport("dwmapi.dll")]
-        private static extern int DwmSetWindowAttribute(
-            IntPtr hWnd,
-            int attribute,
-            ref int value,
-            int valueSize);
-
+        [DllImport("user32.dll")]
+        private static extern bool GetWindowRect(IntPtr hWnd, out NativeRect rect);
         [DllImport("dwmapi.dll")]
         private static extern int DwmGetWindowAttribute(
-            IntPtr hWnd,
-            int attribute,
-            out int value,
-            int valueSize);
-
-        [DllImport("dwmapi.dll")]
-        private static extern int DwmExtendFrameIntoClientArea(
-            IntPtr hWnd,
-            ref Margins margins);
-
-        [DllImport("user32.dll")]
-        private static extern int SetWindowCompositionAttribute(
-            IntPtr hWnd,
-            ref WindowCompositionAttributeData data);
-
-        internal static bool LastExtendFrameApplied { get; private set; }
-
-        internal static void ApplyWindows11PopupStyle(IntPtr hWnd)
-        {
-            TryApplyWindows11Backdrop(hWnd, PopupBackdropKind.Acrylic);
-        }
-
-        internal static bool TryApplyWindows11Backdrop(
-            IntPtr hWnd,
-            PopupBackdropKind kind)
-        {
-            // These calls are best-effort. Older Windows versions simply
-            // ignore unsupported attributes and keep the solid fallback.
-            if (hWnd == IntPtr.Zero)
-            {
-                LastExtendFrameApplied = false;
-                return false;
-            }
-
-            try
-            {
-                if (kind == PopupBackdropKind.None)
-                {
-                    LastExtendFrameApplied = false;
-                    var noBackdrop = 0;
-                    DwmSetWindowAttribute(
-                        hWnd,
-                        DwmwaSystemBackdropType,
-                        ref noBackdrop,
-                        sizeof(int));
-                    return false;
-                }
-
-                var cornerPreference = DwmwcpRound;
-                var cornerResult = DwmSetWindowAttribute(
-                    hWnd,
-                    DwmwaWindowCornerPreference,
-                    ref cornerPreference,
-                    sizeof(int));
-
-                var backdropType = ToDwmBackdropType(kind);
-                var backdropResult = DwmSetWindowAttribute(
-                    hWnd,
-                    DwmwaSystemBackdropType,
-                    ref backdropType,
-                    sizeof(int));
-
-                // Remove DWM's default border when supported; Region already
-                // clips the popup and a dark border looks wrong on acrylic.
-                var borderColorNone = unchecked((int)0xFFFFFFFE);
-                DwmSetWindowAttribute(
-                    hWnd,
-                    DwmwaBorderColor,
-                    ref borderColorNone,
-                    sizeof(int));
-
-                // Do not extend the DWM frame through the whole client area
-                // by default. On borderless WinForms windows this can make
-                // GDI/TextRenderer output participate in the glass composite,
-                // which is exactly what made the notification text look
-                // white and translucent. We keep the API available but leave
-                // the normal popup text path isolated from this glass route.
-                LastExtendFrameApplied = false;
-                return cornerResult == 0 && backdropResult == 0;
-            }
-            catch (DllNotFoundException)
-            {
-                LastExtendFrameApplied = false;
-                return false;
-            }
-            catch (EntryPointNotFoundException)
-            {
-                LastExtendFrameApplied = false;
-                return false;
-            }
-            catch
-            {
-                LastExtendFrameApplied = false;
-                return false;
-            }
-        }
-
-        internal static bool TryApplyAccentAcrylicBackdrop(
-            IntPtr hWnd,
-            Color tint)
-        {
-            // Best-effort fallback for borderless WinForms windows where
-            // DWMWA_SYSTEMBACKDROP_TYPE is accepted but not visually obvious.
-            // The popup remains an ordinary opaque top-level window; text is
-            // painted later by child controls and is not drawn into a layered
-            // bitmap, so ClearType remains sharp.
-            if (hWnd == IntPtr.Zero)
-            {
-                return false;
-            }
-
-            try
-            {
-                var policy = new AccentPolicy
-                {
-                    AccentState = AccentState.EnableAcrylicBlurBehind,
-                    AccentFlags = 2,
-                    GradientColor = ToAbgr(tint),
-                    AnimationId = 0
-                };
-                var policySize = Marshal.SizeOf(typeof(AccentPolicy));
-                var policyPointer = Marshal.AllocHGlobal(policySize);
-                try
-                {
-                    Marshal.StructureToPtr(policy, policyPointer, false);
-                    var data = new WindowCompositionAttributeData
-                    {
-                        Attribute = WcaAccentPolicy,
-                        Data = policyPointer,
-                        SizeOfData = policySize
-                    };
-                    return SetWindowCompositionAttribute(hWnd, ref data) != 0;
-                }
-                finally
-                {
-                    Marshal.FreeHGlobal(policyPointer);
-                }
-            }
-            catch (DllNotFoundException)
-            {
-                return false;
-            }
-            catch (EntryPointNotFoundException)
-            {
-                return false;
-            }
-            catch
-            {
-                return false;
-            }
-        }
-
-        internal static bool TryDisableAccentBackdrop(IntPtr hWnd)
-        {
-            if (hWnd == IntPtr.Zero)
-            {
-                return false;
-            }
-
-            try
-            {
-                var policy = new AccentPolicy
-                {
-                    AccentState = AccentState.Disabled
-                };
-                var policySize = Marshal.SizeOf(typeof(AccentPolicy));
-                var policyPointer = Marshal.AllocHGlobal(policySize);
-                try
-                {
-                    Marshal.StructureToPtr(policy, policyPointer, false);
-                    var data = new WindowCompositionAttributeData
-                    {
-                        Attribute = WcaAccentPolicy,
-                        Data = policyPointer,
-                        SizeOfData = policySize
-                    };
-                    return SetWindowCompositionAttribute(hWnd, ref data) != 0;
-                }
-                finally
-                {
-                    Marshal.FreeHGlobal(policyPointer);
-                }
-            }
-            catch
-            {
-                return false;
-            }
-        }
-
-        private static int ToAbgr(Color color)
-        {
-            unchecked
-            {
-                return (int)((uint)color.A << 24 |
-                             (uint)color.B << 16 |
-                             (uint)color.G << 8 |
-                             color.R);
-            }
-        }
-
-        private static int ToDwmBackdropType(PopupBackdropKind kind)
-        {
-            switch (kind)
-            {
-                case PopupBackdropKind.Mica:
-                    return DwmsbtMainWindow;
-                case PopupBackdropKind.MicaAlt:
-                    return DwmsbtTabbedWindow;
-                case PopupBackdropKind.Acrylic:
-                    return DwmsbtTransientWindow;
-                default:
-                    return 0;
-            }
-        }
+            IntPtr hWnd, int attribute, out int value, int valueSize);
 
         internal static string ReadClassName(IntPtr hWnd)
         {
@@ -341,16 +57,9 @@ namespace WeChatMessageNotifier
         {
             bounds = Rectangle.Empty;
             NativeRect nativeRect;
-            if (!GetWindowRect(hWnd, out nativeRect))
-            {
-                return false;
-            }
-
+            if (!GetWindowRect(hWnd, out nativeRect)) return false;
             bounds = Rectangle.FromLTRB(
-                nativeRect.Left,
-                nativeRect.Top,
-                nativeRect.Right,
-                nativeRect.Bottom);
+                nativeRect.Left, nativeRect.Top, nativeRect.Right, nativeRect.Bottom);
             return bounds.Width > 0 && bounds.Height > 0;
         }
 
@@ -360,138 +69,9 @@ namespace WeChatMessageNotifier
             {
                 int cloaked;
                 return DwmGetWindowAttribute(
-                           hWnd,
-                           DwmwaCloaked,
-                           out cloaked,
-                           sizeof(int)) == 0 &&
-                       cloaked != 0;
+                    hWnd, DwmwaCloaked, out cloaked, sizeof(int)) == 0 && cloaked != 0;
             }
-            catch
-            {
-                return false;
-            }
-        }
-
-        internal static bool PostLeftClick(
-            IntPtr hWnd,
-            Point screenPoint)
-        {
-            var clientPoint = new NativePoint
-            {
-                X = screenPoint.X,
-                Y = screenPoint.Y
-            };
-            if (!ScreenToClient(hWnd, ref clientPoint))
-            {
-                return false;
-            }
-
-            var packedPoint = new IntPtr(
-                (clientPoint.X & 0xFFFF) |
-                ((clientPoint.Y & 0xFFFF) << 16));
-            var downPosted = PostMessage(
-                hWnd,
-                WmLeftButtonDown,
-                MkLeftButton,
-                packedPoint);
-            var upPosted = PostMessage(
-                hWnd,
-                WmLeftButtonUp,
-                IntPtr.Zero,
-                packedPoint);
-            return downPosted && upPosted;
-        }
-
-        internal static bool TryGetExternalTopmostWindowAt(
-            Point point,
-            int currentProcessId,
-            out Rectangle rectangle)
-        {
-            rectangle = Rectangle.Empty;
-            var workingArea = Screen.FromPoint(point).WorkingArea;
-            var foundRectangle = Rectangle.Empty;
-            // Enumerate top-level windows instead of using WindowFromPoint.
-            // Our popup reasserts TOPMOST regularly and can otherwise hide the
-            // tray overflow panel before WindowFromPoint gets a chance to see
-            // it. Enumeration still finds that panel underneath our window.
-            EnumWindows(delegate(IntPtr candidate, IntPtr ignored)
-            {
-                if (!IsWindowVisible(candidate))
-                {
-                    return true;
-                }
-
-                // Windows 11 keeps some closed XAML flyouts alive as visible
-                // top-level windows but marks them cloaked in DWM. Treating
-                // those dormant hosts as an obstruction prevents the popup
-                // from ever animating back down.
-                int cloaked;
-                if (DwmGetWindowAttribute(
-                        candidate,
-                        DwmwaCloaked,
-                        out cloaked,
-                        sizeof(int)) == 0 &&
-                    cloaked != 0)
-                {
-                    return true;
-                }
-
-                uint processId;
-                GetWindowThreadProcessId(candidate, out processId);
-                if (processId == (uint)currentProcessId)
-                {
-                    return true;
-                }
-
-                NativeRect nativeRect;
-                if (!GetWindowRect(candidate, out nativeRect))
-                {
-                    return true;
-                }
-
-                var candidateRectangle = Rectangle.FromLTRB(
-                    nativeRect.Left,
-                    nativeRect.Top,
-                    nativeRect.Right,
-                    nativeRect.Bottom);
-                if (candidateRectangle.Width <= 0 ||
-                    candidateRectangle.Height <= 0 ||
-                    !candidateRectangle.Contains(point))
-                {
-                    return true;
-                }
-
-                var className = ReadClassName(candidate);
-                var trayOverflow =
-                    className.IndexOf("NotifyIconOverflowWindow", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                    className.IndexOf("TopLevelWindowForOverflowXamlIsland", StringComparison.OrdinalIgnoreCase) >= 0;
-
-                var extendedStyle = GetWindowLong(candidate, GwlExStyle);
-                var topmost = (extendedStyle & WsExTopmost) != 0;
-                // A real QQ/Windows toast is a relatively small window anchored
-                // to the lower-right work area. Clipboard history and other
-                // XAML panels may expose a large or screen-sized topmost host;
-                // those remain excluded.
-                var notificationSized =
-                    candidateRectangle.Width <= Math.Min(640, workingArea.Width / 2) &&
-                    candidateRectangle.Height <= Math.Min(320, workingArea.Height / 3);
-                var rightAnchored =
-                    Math.Abs(workingArea.Right - candidateRectangle.Right) <= 96;
-                var bottomAnchored =
-                    Math.Abs(workingArea.Bottom - candidateRectangle.Bottom) <= 160;
-
-                if (trayOverflow ||
-                    (topmost && notificationSized && rightAnchored && bottomAnchored))
-                {
-                    foundRectangle = candidateRectangle;
-                    return false;
-                }
-
-                return true;
-            }, IntPtr.Zero);
-
-            rectangle = foundRectangle;
-            return foundRectangle != Rectangle.Empty;
+            catch { return false; }
         }
 
         [StructLayout(LayoutKind.Sequential)]
@@ -501,48 +81,6 @@ namespace WeChatMessageNotifier
             internal int Top;
             internal int Right;
             internal int Bottom;
-        }
-
-        [StructLayout(LayoutKind.Sequential)]
-        private struct NativePoint
-        {
-            internal int X;
-            internal int Y;
-        }
-
-        [StructLayout(LayoutKind.Sequential)]
-        private struct Margins
-        {
-            internal int Left;
-            internal int Right;
-            internal int Top;
-            internal int Bottom;
-        }
-
-        private enum AccentState
-        {
-            Disabled = 0,
-            EnableGradient = 1,
-            EnableTransparentGradient = 2,
-            EnableBlurBehind = 3,
-            EnableAcrylicBlurBehind = 4
-        }
-
-        [StructLayout(LayoutKind.Sequential)]
-        private struct AccentPolicy
-        {
-            internal AccentState AccentState;
-            internal int AccentFlags;
-            internal int GradientColor;
-            internal int AnimationId;
-        }
-
-        [StructLayout(LayoutKind.Sequential)]
-        private struct WindowCompositionAttributeData
-        {
-            internal int Attribute;
-            internal IntPtr Data;
-            internal int SizeOfData;
         }
     }
 }

@@ -43,14 +43,12 @@ namespace WeChatMessageNotifier
         private const string ServiceAccountLabel = "\u670D\u52A1\u53F7";
         private const string SubscriptionAccountLabel = "\u8BA2\u9605\u53F7";
         private const string OfficialAccountLabel = "\u516C\u4F17\u53F7";
-        private const string MutedLabel = "\u6D88\u606F\u514D\u6253\u6270";
         private const string GroupChatLabel = "\u7FA4\u804A";
 
         internal static ChatSession Parse(
             string rawName,
             int position,
-            string automationId = null,
-            bool hasMutedVisualMarker = false)
+            string automationId = null)
         {
             if (string.IsNullOrWhiteSpace(rawName))
             {
@@ -154,24 +152,13 @@ namespace WeChatMessageNotifier
                 ContainsExactLine(lines, SubscriptionAccountLabel) ||
                 ContainsExactLine(lines, OfficialAccountLabel) ||
                 HasStableOfficialAccountId(sessionKey, automationId);
-            var isMuted =
-                ContainsExactLine(lines, MutedLabel) ||
-                ContainsExactLine(lines, "\u514D\u6253\u6270") ||
-                ContainsExactLine(lines, "\u9759\u97F3") ||
-                hasMutedVisualMarker;
             var hasGroupMarker =
                 HasStableGroupId(sessionKey) ||
                 HasStableGroupId(automationId) ||
-                ContainsExactLine(lines, GroupChatLabel) ||
-                // A crossed-bell marker is strong UIA evidence of mute.  Only
-                // combine it with a group-shaped display label (name plus a
-                // visible member count) to cover WeChat rows that omit the
-                // @chatroom identity without guessing from "群" alone.
-                (hasMutedVisualMarker && LooksLikeGroupDisplayName(contact));
+                ContainsExactLine(lines, GroupChatLabel);
             var kind = Classify(
                 hasServiceLabel,
                 hasOfficialMarker,
-                isMuted,
                 hasGroupMarker);
             return new ChatSession
             {
@@ -183,14 +170,11 @@ namespace WeChatMessageNotifier
                 Position = position,
                 Kind = kind,
                 DetectedKind = kind,
-                IsMuted = isMuted,
                 ContactHash = ShortHash(sessionKey),
                 RawLineCount = lines.Count,
                 HasServiceLabel = hasServiceLabel,
                 HasOfficialLabel = hasOfficialMarker,
                 HasOfficialMarker = hasOfficialMarker,
-                HasMutedLabel = isMuted,
-                HasMutedVisualMarker = hasMutedVisualMarker,
                 HasGroupMarker = hasGroupMarker,
                 // Timestamp text is presentation state: "刚刚" later becomes
                 // a clock time even though the message itself did not change.
@@ -201,7 +185,6 @@ namespace WeChatMessageNotifier
         private static ChatSessionKind Classify(
             bool hasServiceLabel,
             bool hasOfficialMarker,
-            bool isMuted,
             bool hasGroupMarker)
         {
             if (hasServiceLabel)
@@ -215,9 +198,7 @@ namespace WeChatMessageNotifier
 
             if (hasGroupMarker)
             {
-                return isMuted
-                    ? ChatSessionKind.MutedGroupChat
-                    : ChatSessionKind.GroupChat;
+                return ChatSessionKind.GroupChat;
             }
 
             // WeChat 4.x often exposes only "session_item_<display name>".
@@ -261,35 +242,6 @@ namespace WeChatMessageNotifier
                    value.IndexOf(
                        "@chatroom",
                        StringComparison.OrdinalIgnoreCase) >= 0;
-        }
-
-        private static bool LooksLikeGroupDisplayName(string contact)
-        {
-            if (string.IsNullOrWhiteSpace(contact) ||
-                contact.IndexOf('\u7FA4') < 0)
-            {
-                return false;
-            }
-
-            var trimmed = contact.TrimEnd();
-            var opening = Math.Max(
-                trimmed.LastIndexOf('('),
-                trimmed.LastIndexOf('\uFF08'));
-            if (opening < 1 || opening >= trimmed.Length - 3)
-            {
-                return false;
-            }
-
-            var closing = trimmed[trimmed.Length - 1];
-            if (closing != ')' && closing != '\uFF09')
-            {
-                return false;
-            }
-
-            int memberCount;
-            return int.TryParse(
-                trimmed.Substring(opening + 1, trimmed.Length - opening - 2),
-                out memberCount) && memberCount >= 10;
         }
 
         private static bool ContainsExactLine(
@@ -433,8 +385,8 @@ namespace WeChatMessageNotifier
             using (var sha = SHA256.Create())
             {
                 var bytes = sha.ComputeHash(Encoding.UTF8.GetBytes(value));
-                var builder = new StringBuilder(8);
-                for (var index = 0; index < 4; index++)
+                var builder = new StringBuilder(16);
+                for (var index = 0; index < 8; index++)
                 {
                     builder.Append(bytes[index].ToString("x2"));
                 }

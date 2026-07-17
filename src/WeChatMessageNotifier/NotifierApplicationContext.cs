@@ -43,10 +43,8 @@ namespace WeChatMessageNotifier
             logger = new Logger();
             settingsStore = new SettingsStore(logger);
             notificationFilters = settingsStore.Load();
-            // Custom WinForms cards were removed. Migrate any old setting to
-            // the single supported delivery path before the monitor starts.
-            notificationFilters.NotificationDisplayMode =
-                NotificationDisplayMode.WindowsToast;
+            // Persist the active schema once so legacy popup/motion fields and
+            // retired type switches disappear without touching hash-only rules.
             settingsStore.Save(notificationFilters);
             monitor = new WeChatMonitor(logger);
             notificationCenter = new WindowsNotificationCenter(
@@ -82,32 +80,6 @@ namespace WeChatMessageNotifier
             {
                 privacyMode = privacyItem.Checked;
             };
-
-            var notificationTypesItem = new ToolStripMenuItem("\u63D0\u9192\u7C7B\u578B");
-            notificationTypesItem.DropDownItems.Add(
-                CreateFilterItem(
-                    "\u666E\u901A\u8054\u7CFB\u4EBA\u63D0\u9192",
-                    ChatSessionKind.DirectContact));
-            notificationTypesItem.DropDownItems.Add(
-                CreateFilterItem(
-                    "\u516C\u4F17\u53F7\u63D0\u9192",
-                    ChatSessionKind.OfficialAccount));
-            notificationTypesItem.DropDownItems.Add(
-                CreateFilterItem(
-                    "\u670D\u52A1\u53F7\u63D0\u9192",
-                    ChatSessionKind.ServiceAccount));
-            notificationTypesItem.DropDownItems.Add(
-                CreateFilterItem(
-                    "\u666E\u901A\u7FA4\u804A\u63D0\u9192",
-                    ChatSessionKind.GroupChat));
-            notificationTypesItem.DropDownItems.Add(
-                CreateFilterItem(
-                    "\u514D\u6253\u6270\u7FA4\u804A\u63D0\u9192",
-                    ChatSessionKind.MutedGroupChat));
-            notificationTypesItem.DropDownItems.Add(
-                CreateFilterItem(
-                    "\u672A\u77E5\u7C7B\u578B\u63D0\u9192",
-                    ChatSessionKind.Unknown));
 
             var testItem = new ToolStripMenuItem("发送测试通知");
             testItem.Click += delegate
@@ -176,7 +148,6 @@ namespace WeChatMessageNotifier
             var menu = new ContextMenuStrip();
             menu.Items.Add(pauseItem);
             menu.Items.Add(privacyItem);
-            menu.Items.Add(notificationTypesItem);
             menu.Items.Add(diagnosticItem);
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add(testItem);
@@ -229,12 +200,7 @@ namespace WeChatMessageNotifier
                 return;
             }
 
-            if (settingsStore.ReloadIfChanged(notificationFilters))
-            {
-                notificationFilters.NotificationDisplayMode =
-                    NotificationDisplayMode.WindowsToast;
-                settingsStore.Save(notificationFilters);
-            }
+            settingsStore.ReloadIfChanged(notificationFilters);
             var changes = monitor.Poll();
             if (changes.Count == 0)
             {
@@ -250,28 +216,29 @@ namespace WeChatMessageNotifier
 
             foreach (var session in changes)
             {
-                session.Kind = notificationFilters.ResolveKind(
-                    session.ContactHash,
-                    session.DetectedKind);
-                var filterEnabled = ShouldDeliverNotification(
+                var decision = EvaluateNotification(
                     notificationFilters,
                     session);
+                session.Kind = decision.ResolvedKind;
                 if (diagnosticNextItem.Checked)
                 {
                     LogCandidateDiagnostic(
                         session,
-                        filterEnabled,
-                        filterEnabled ? "Allowed" : "Blocked");
+                        decision);
                     diagnosticNextItem.Checked = false;
                 }
 
-                if (!filterEnabled)
+                if (!decision.ShouldDeliver)
                 {
                     logger.Info(
                         "Notification filtered. ContactHash=" +
                         session.ContactHash +
-                        " Kind=" +
+                        " DetectedKind=" +
+                        session.DetectedKind +
+                        " ResolvedKind=" +
                         session.Kind +
+                        " Reason=" +
+                        decision.Reason +
                         " Count=1");
                     continue;
                 }
@@ -355,58 +322,141 @@ namespace WeChatMessageNotifier
             NotificationFilterSettings settings,
             ChatSession session)
         {
-            return settings != null &&
-                   session != null &&
-                   settings.IsEnabled(session.Kind);
+            return EvaluateNotification(settings, session).ShouldDeliver;
         }
 
-        private ToolStripMenuItem CreateFilterItem(
-            string text,
-            ChatSessionKind kind)
+        internal static NotificationDecision EvaluateNotification(
+            NotificationFilterSettings settings,
+            ChatSession session)
         {
-            var item = new ToolStripMenuItem(text)
+            var decision = new NotificationDecision
             {
-                Checked = notificationFilters.IsEnabled(kind),
-                CheckOnClick = true
+                ShouldDeliver = false,
+                ResolvedKind = ChatSessionKind.Unknown,
+                DefaultPolicy = "NoSession",
+                Reason = "NoSession"
             };
-            item.CheckedChanged += delegate
+            if (settings == null || session == null)
             {
-                notificationFilters.SetEnabled(kind, item.Checked);
-                settingsStore.Save(notificationFilters);
-            };
-            return item;
+                return decision;
+            }
+
+            decision.ResolvedKind = settings.ResolveKind(
+                session.ContactHash,
+                session.DetectedKind);
+            decision.NotificationOverride = settings.ResolveNotificationOverride(
+                session.ContactHash);
+
+            // Official accounts are keyword-allow-only. A matching current
+            // summary can notify; all other official messages remain blocked.
+            if (session.DetectedKind == ChatSessionKind.OfficialAccount ||
+                session.HasOfficialMarker ||
+                decision.ResolvedKind == ChatSessionKind.OfficialAccount)
+            {
+                decision.DefaultPolicy = "OfficialAccountKeywordAllowOnly";
+                decision.ShouldDeliver = settings.HasOfficialAccountAllowKeyword(
+                    session.Preview);
+                decision.Reason = decision.ShouldDeliver
+                    ? "OfficialAccountKeywordMatched"
+                    : "OfficialAccountKeywordNotMatched";
+                return decision;
+            }
+
+            if (decision.ResolvedKind == ChatSessionKind.ServiceAccount)
+            {
+                decision.DefaultPolicy = "ServiceAccountKeywordOrSessionAllow";
+                if (decision.NotificationOverride == SessionNotificationOverride.Block)
+                {
+                    decision.Reason = "ServiceAccountExplicitlyBlocked";
+                    return decision;
+                }
+                if (settings.HasServiceAccountAllowKeyword(session.Preview))
+                {
+                    decision.ShouldDeliver = true;
+                    decision.Reason = "ServiceAccountKeywordMatched";
+                    return decision;
+                }
+                decision.ShouldDeliver =
+                    decision.NotificationOverride ==
+                    SessionNotificationOverride.Allow;
+                decision.Reason = decision.ShouldDeliver
+                    ? "ServiceAccountExplicitlyAllowed"
+                    : "ServiceAccountNotAllowed";
+                return decision;
+            }
+
+            if (decision.ResolvedKind == ChatSessionKind.GroupChat)
+            {
+                decision.DefaultPolicy = "GroupChatDefaultAllowed";
+                if (decision.NotificationOverride == SessionNotificationOverride.Block)
+                {
+                    decision.Reason = "GroupChatExplicitlyBlocked";
+                    return decision;
+                }
+                if (settings.HasGroupChatBlockKeyword(session.Contact))
+                {
+                    decision.Reason = "GroupChatNameBlockKeywordMatched";
+                    return decision;
+                }
+                decision.ShouldDeliver = true;
+                decision.Reason = "GroupChatDefaultAllowed";
+                return decision;
+            }
+
+            if (decision.ResolvedKind == ChatSessionKind.DirectContact)
+            {
+                decision.DefaultPolicy = "DirectContactDefaultAllowed";
+                decision.ShouldDeliver =
+                    decision.NotificationOverride !=
+                    SessionNotificationOverride.Block;
+                decision.Reason = decision.ShouldDeliver
+                    ? "DirectContactDefaultAllowed"
+                    : "DirectContactExplicitlyBlocked";
+                return decision;
+            }
+
+            decision.DefaultPolicy = "UnknownDefaultAllowed";
+            decision.ShouldDeliver =
+                decision.NotificationOverride != SessionNotificationOverride.Block;
+            decision.Reason = decision.ShouldDeliver
+                ? "UnknownDefaultAllowed"
+                : "UnknownExplicitlyBlocked";
+            return decision;
         }
 
         private void LogCandidateDiagnostic(
             ChatSession session,
-            bool filterEnabled,
-            string result)
+            NotificationDecision decision)
         {
             logger.Info(FormatCandidateDiagnostic(
                 session,
-                filterEnabled,
-                result));
+                decision));
         }
 
         internal static string FormatCandidateDiagnostic(
             ChatSession session,
-            bool filterEnabled,
-            string result)
+            NotificationDecision decision)
         {
             return "Notification candidate: ContactHash=" +
                 session.ContactHash +
-                ", Kind=" +
-                session.Kind +
-                ", IsMuted=" +
-                session.IsMuted +
+                ", DetectedKind=" +
+                session.DetectedKind +
+                ", ResolvedKind=" +
+                decision.ResolvedKind +
+                ", NotificationOverride=" +
+                (decision.NotificationOverride.HasValue
+                    ? decision.NotificationOverride.Value.ToString()
+                    : "None") +
+                ", DefaultPolicy=" +
+                decision.DefaultPolicy +
+                ", Result=" +
+                (decision.ShouldDeliver ? "Allowed" : "Blocked") +
+                ", Reason=" +
+                decision.Reason +
                 ", HasGroupMarker=" +
                 session.HasGroupMarker +
                 ", HasOfficialMarker=" +
-                session.HasOfficialMarker +
-                ", FilterEnabled=" +
-                filterEnabled +
-                ", Result=" +
-                result;
+                session.HasOfficialMarker;
         }
 
         private static string Limit(string value, int maximum)

@@ -8,6 +8,20 @@ outputs/**/*.zip
 *.tmp
 *.bak
 
+# Local Codex review exports; source is already tracked separately.
+WeChatMessageNotifier-*-review.zip
+WeChatMessageNotifier-current-source.zip
+codex-*-review.diff
+codex-*-status.txt
+codex-review.diff
+codex-status.txt
+codex-*-files.txt
+codex-*-test-result.txt
+codex-*-build-result.txt
+codex-*-integration-result.txt
+codex-*-file-map.md
+codex-*-review/
+
 # Visual Studio / editor state
 .vs/
 .vscode/

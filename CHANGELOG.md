@@ -1,12 +1,20 @@
 # Changelog
 
+## 2.6.0 - 2026-07-17
+
+- Removed the legacy custom-popup, animation, acrylic/glass, DPI-popup, and system-panel-avoidance source files, their settings, and their self-tests. Windows system notifications are the only supported reminder implementation.
+- Replaced global six-type switches with session-level notification rules: groups, direct contacts, and unknown sessions default to notify and can be set to `Block`.
+- Removed the retired mute-specific group type and all mute-label classification. The monitor does not inspect screenshots, icons, pixels, coordinates, or crossed-bell geometry.
+- Added `sessionNotificationOverrides` alongside `sessionKindOverrides`, and expanded newly generated anonymous contact hashes to 16 hexadecimal characters.
+- Added summary-keyword allowlists: matching service-account and official-account summaries can notify; service accounts remain blocked when neither their session nor a keyword allows them.
+- Added group-name block keywords that override a per-session group allow rule.
+
 ## 2.5.1 - 2026-07-15
 
 - Removed the legacy custom-popup, animation, glass, and system-panel-avoidance paths from the running application. Windows system notifications are now the only delivery path.
-- The tray menu no longer exposes custom-popup display, motion, or visual-effect controls. Legacy source files remain temporarily for a later, isolated cleanup after the Windows-toast workflow has been stable in daily use.
+- The tray menu no longer exposes custom-popup display, motion, or visual-effect controls.
 - Clear a session's aggregated notification count and matching Windows Notification Center history only after WeChat UI Automation confirms that the intended conversation was selected. The next message starts again at one.
-- Reduced tray-menu stalls by calculating the WeChat page kind once per polling pass and caching crossed-bell UIA checks for group candidates.
-- Improved best-effort muted-group recognition for WeChat 4.x crossed-bell session-row markers.
+- Reduced tray-menu stalls by calculating the WeChat page kind once per polling pass.
 
 ## 2.5.0 - 2026-07-10
 

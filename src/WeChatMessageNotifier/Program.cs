@@ -261,13 +261,11 @@ namespace WeChatMessageNotifier
                 Console.WriteLine(
                     "INTEGRATION-TEST PASSED: sessionCount=" + monitor.LastSessionCount +
                     " selectedCount=" + monitor.LastSelectedSessionCount +
-                    " mutedCount=" + monitor.LastMutedSessionCount +
                     " groupMarkerCount=" + monitor.LastGroupMarkerCount +
                     " direct=" + monitor.GetLastSessionKindCount(ChatSessionKind.DirectContact) +
                     " official=" + monitor.GetLastSessionKindCount(ChatSessionKind.OfficialAccount) +
                     " service=" + monitor.GetLastSessionKindCount(ChatSessionKind.ServiceAccount) +
                     " group=" + monitor.GetLastSessionKindCount(ChatSessionKind.GroupChat) +
-                    " mutedGroup=" + monitor.GetLastSessionKindCount(ChatSessionKind.MutedGroupChat) +
                     " unknown=" + monitor.GetLastSessionKindCount(ChatSessionKind.Unknown) +
                     " contentWasNotPrinted=true");
                 return 0;
