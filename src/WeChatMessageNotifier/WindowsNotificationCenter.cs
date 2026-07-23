@@ -76,7 +76,11 @@ namespace WeChatMessageNotifier
                          File.Exists(iconSourcePath)) +
                         " HasToastLogo=" +
                         (!string.IsNullOrWhiteSpace(toastLogoPath) &&
-                         File.Exists(toastLogoPath)));
+                         File.Exists(toastLogoPath)) +
+                        " ToastLogoSource=" +
+                        (string.IsNullOrWhiteSpace(iconSourcePath)
+                            ? "CachedOrUnavailable"
+                            : "WeChatExecutable"));
                 }
                 available = true;
                 logger.Info("Windows notification center integration initialized.");
@@ -485,12 +489,33 @@ namespace WeChatMessageNotifier
             return new Uri(path).AbsoluteUri;
         }
 
+        internal static string SelectExistingToastLogoForTest(
+            string iconSourcePath,
+            string cachedLogoPath)
+        {
+            if (!string.IsNullOrWhiteSpace(iconSourcePath) &&
+                File.Exists(iconSourcePath))
+            {
+                return iconSourcePath;
+            }
+
+            return !string.IsNullOrWhiteSpace(cachedLogoPath) &&
+                   File.Exists(cachedLogoPath)
+                ? cachedLogoPath
+                : null;
+        }
+
         private static string PrepareToastLogo(string iconSourcePath)
         {
+            var iconPath = GetToastLogoCachePath();
             if (string.IsNullOrWhiteSpace(iconSourcePath) ||
                 !File.Exists(iconSourcePath))
             {
-                return null;
+                // The notifier can be launched by toast activation before
+                // WeChat itself is running.  Retain the last known WeChat
+                // icon instead of replacing the notification logo with the
+                // generic notifier executable icon.
+                return SelectExistingToastLogoForTest(null, iconPath);
             }
 
             try
@@ -507,9 +532,7 @@ namespace WeChatMessageNotifier
                             Environment.SpecialFolder.LocalApplicationData),
                         "WeChatMessageNotifier");
                     Directory.CreateDirectory(directory);
-                    var iconPath = Path.Combine(
-                        directory,
-                        "weixin-toast-icon.png");
+                    iconPath = Path.Combine(directory, "weixin-toast-icon.png");
                     using (var bitmap = icon.ToBitmap())
                     {
                         bitmap.Save(iconPath, ImageFormat.Png);
@@ -521,6 +544,15 @@ namespace WeChatMessageNotifier
             {
                 return null;
             }
+        }
+
+        private static string GetToastLogoCachePath()
+        {
+            return Path.Combine(
+                Environment.GetFolderPath(
+                    Environment.SpecialFolder.LocalApplicationData),
+                "WeChatMessageNotifier",
+                "weixin-toast-icon.png");
         }
 
         private static string ResolveWeChatIconSourcePath()
@@ -676,6 +708,16 @@ namespace WeChatMessageNotifier
                 Environment.SpecialFolder.Programs);
             var shortcutPath = Path.Combine(programs, ShortcutName);
             var executablePath = Application.ExecutablePath;
+            if ((string.IsNullOrWhiteSpace(iconSourcePath) ||
+                 !File.Exists(iconSourcePath)) &&
+                File.Exists(shortcutPath))
+            {
+                // Keep an existing WeChat-icon shortcut intact when this
+                // instance starts before WeChat can be located.  The launcher
+                // normally prevents that timing, and a later normal startup
+                // can refresh the shortcut from WeChat's executable.
+                return;
+            }
             var shortcutIconPath =
                 !string.IsNullOrWhiteSpace(iconSourcePath) &&
                 File.Exists(iconSourcePath)

@@ -1,5 +1,19 @@
 # Changelog
 
+## 3.0.0 - 2026-07-23
+
+- Replaced the production WinForms settings and tray-menu path with a self-contained WinUI 3 interface, while keeping the monitor, notification delivery, keyword rules, and local settings format unchanged.
+- Added Windows 11 Mica settings UI with Per-Monitor-V2 DPI behavior, responsive one/two/three-column keyword cards, stable native text editing, and a resizable layout that does not recreate controls while resizing.
+- Added a Windows 11 Desktop Acrylic tray menu with in-window expandable command groups, clear deep-color text, and responsive one/two/three-column layout when the user widens the menu.
+- Made both WinUI title bars use the locally installed WeChat icon when it is available; the icon is derived locally and no image, contact, or message data is uploaded.
+- Added a small local command bridge between the notifier and the WinUI tray menu so UI actions remain explicit, local, and do not expose message content.
+- Restyled the local settings and decision-history windows with Windows 11 Mica background, rounded system corners, a calm light palette, rounded opaque cards, native typography, and clearer primary/secondary action hierarchy.
+- Made local settings writes atomic with a retained `.bak` recovery copy, and reduced UI Automation polling to five seconds while WeChat is absent or its session list is unavailable.
+- Added a compact local settings window for keyword rules and privacy mode, and reorganized the tray context menu into status, settings, notification/testing, and diagnostic/file groups.
+- Treat every WeChat session whose display name contains “群” as a group chat, so group-name block keywords also work when WeChat UIA omits the `@chatroom` identity.
+- Added `WeChatNotifierLauncher.exe`: the optional sign-in launcher waits for WeChat's process-start event and starts the notifier only after `Weixin.exe` / `WeChat.exe` begins. It exits immediately after launching and does not use a polling timer.
+- Retained the cached WeChat toast logo when the notifier starts before the live WeChat executable can be resolved, and no longer overwrites an existing Start-menu shortcut with the generic notifier icon in that case.
+
 ## 2.6.0 - 2026-07-17
 
 - Removed the legacy custom-popup, animation, acrylic/glass, DPI-popup, and system-panel-avoidance source files, their settings, and their self-tests. Windows system notifications are the only supported reminder implementation.

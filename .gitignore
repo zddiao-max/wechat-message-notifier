@@ -1,7 +1,10 @@
 # Build and test output
 work/
+bin/
+obj/
 outputs/**/*.exe
 outputs/**/*.zip
+outputs/WeChatMessageNotifier/SettingsUi/
 
 # Local logs and temporary files
 *.log
@@ -11,6 +14,7 @@ outputs/**/*.zip
 # Local Codex review exports; source is already tracked separately.
 WeChatMessageNotifier-*-review.zip
 WeChatMessageNotifier-current-source.zip
+WeChatMessageNotifier-current-source-*.zip
 codex-*-review.diff
 codex-*-status.txt
 codex-review.diff

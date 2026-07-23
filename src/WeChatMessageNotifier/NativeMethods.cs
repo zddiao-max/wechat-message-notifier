@@ -8,8 +8,20 @@ using System.Text;
 
 namespace WeChatMessageNotifier
 {
+    // Values documented for DWMWA_SYSTEMBACKDROP_TYPE on Windows 11.
+    // None is kept for an explicit opt-out; the UI uses MainWindow for Mica
+    // and TransientWindow for menu-like Acrylic surfaces.
+    internal enum Win11BackdropKind
+    {
+        None = 1,
+        MainWindow = 2,
+        TransientWindow = 3,
+        TabbedWindow = 4
+    }
+
     // Win32 calls needed by read-only WeChat window discovery and activation.
-    // Popup placement, backdrop, acrylic and occlusion APIs were removed.
+    // Popup placement and occlusion APIs were removed. The remaining DWM
+    // calls are used only for the settings and tray-menu visual shell.
     internal static class NativeMethods
     {
         internal delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
@@ -17,6 +29,14 @@ namespace WeChatMessageNotifier
         internal const int SwShow = 5;
         internal const int SwShowMaximized = 3;
         private const int DwmwaCloaked = 14;
+        private const int DwmwaWindowCornerPreference = 33;
+        private const int DwmwaSystemBackdropType = 38;
+        private const int DwmWindowCornerPreferenceRound = 2;
+        private const int WcaAccentPolicy = 19;
+        private const int AccentEnableAcrylicBlurBehind = 4;
+        // GradientColor is AABBGGRR. A white, 72% opaque tint counteracts
+        // Acrylic's default gray cast while leaving genuine translucency.
+        internal const int LightTrayAcrylicTintAlpha = 184;
 
         [DllImport("user32.dll")]
         internal static extern bool EnumWindows(EnumWindowsProc callback, IntPtr lParam);
@@ -36,15 +56,26 @@ namespace WeChatMessageNotifier
         internal static extern bool ShowWindow(IntPtr hWnd, int command);
         [DllImport("user32.dll")]
         internal static extern bool SetForegroundWindow(IntPtr hWnd);
+        [DllImport("user32.dll")]
+        private static extern short GetAsyncKeyState(int virtualKey);
         [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
         internal static extern int SetCurrentProcessExplicitAppUserModelID(string appId);
         [DllImport("user32.dll", CharSet = CharSet.Unicode)]
         internal static extern int GetClassName(IntPtr hWnd, StringBuilder className, int maxCount);
         [DllImport("user32.dll")]
         private static extern bool GetWindowRect(IntPtr hWnd, out NativeRect rect);
+        [DllImport("user32.dll")]
+        private static extern uint GetDpiForWindow(IntPtr hWnd);
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool SetWindowCompositionAttribute(
+            IntPtr hWnd,
+            ref WindowCompositionAttributeData data);
         [DllImport("dwmapi.dll")]
         private static extern int DwmGetWindowAttribute(
             IntPtr hWnd, int attribute, out int value, int valueSize);
+        [DllImport("dwmapi.dll")]
+        private static extern int DwmSetWindowAttribute(
+            IntPtr hWnd, int attribute, ref int value, int valueSize);
 
         internal static string ReadClassName(IntPtr hWnd)
         {
@@ -63,6 +94,31 @@ namespace WeChatMessageNotifier
             return bounds.Width > 0 && bounds.Height > 0;
         }
 
+        internal static int GetWindowDpiOrDefault(IntPtr hWnd)
+        {
+            try
+            {
+                var dpi = GetDpiForWindow(hWnd);
+                return dpi >= 96 && dpi <= 960 ? (int)dpi : 96;
+            }
+            catch
+            {
+                return 96;
+            }
+        }
+
+        internal static bool IsVirtualKeyDown(int virtualKey)
+        {
+            try
+            {
+                return (GetAsyncKeyState(virtualKey) & 0x8000) != 0;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
         internal static bool IsWindowCloaked(IntPtr hWnd)
         {
             try
@@ -74,6 +130,122 @@ namespace WeChatMessageNotifier
             catch { return false; }
         }
 
+        internal static bool TryApplyRoundedWindowCorners(IntPtr hWnd)
+        {
+            try
+            {
+                var preference = DwmWindowCornerPreferenceRound;
+                return DwmSetWindowAttribute(
+                    hWnd,
+                    DwmwaWindowCornerPreference,
+                    ref preference,
+                    sizeof(int)) == 0;
+            }
+            catch { return false; }
+        }
+
+        // Official Windows 11 System Backdrop route for long-lived settings
+        // windows. This never changes Form.Opacity or TransparencyKey.
+        internal static bool TryApplySystemBackdrop(
+            IntPtr hWnd,
+            Win11BackdropKind kind)
+        {
+            int ignoredAttributeResult;
+            int ignoredExtendResult;
+            return TryApplySystemBackdrop(
+                hWnd,
+                kind,
+                out ignoredAttributeResult,
+                out ignoredExtendResult);
+        }
+
+        internal static bool TryApplySystemBackdrop(
+            IntPtr hWnd,
+            Win11BackdropKind kind,
+            out int attributeResult,
+            out int extendResult)
+        {
+            attributeResult = -1;
+            extendResult = -1;
+            try
+            {
+                var backdrop = (int)kind;
+                attributeResult = DwmSetWindowAttribute(
+                    hWnd,
+                    DwmwaSystemBackdropType,
+                    ref backdrop,
+                    sizeof(int));
+                if (attributeResult != 0)
+                {
+                    return false;
+                }
+
+                // DWMWA_SYSTEMBACKDROP_TYPE owns the window backdrop; it does
+                // not require (and should not be combined with) a -1 frame
+                // extension on a .NET Framework WinForms client area. The
+                // latter moves native child controls into a DWM-composited
+                // surface and can produce invalid GDI+ paint parameters,
+                // black clients, and stale redraws during resize. Keep the
+                // ordinary WinForms client surface for stable controls.
+                extendResult = 0;
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        // The tray menu is a self-drawn, short-lived surface with no native
+        // Label/TextBox controls. Its dedicated light Acrylic path is kept
+        // deliberately separate from the Mica settings window: TransientWindow
+        // System Backdrop applies a fixed gray material that cannot be made
+        // light enough over a white document by GDI tinting alone.
+        internal static bool TryApplyLightTrayAcrylic(
+            IntPtr hWnd,
+            out int nativeError)
+        {
+            nativeError = -1;
+            IntPtr accentMemory = IntPtr.Zero;
+            try
+            {
+                var accent = new AccentPolicy
+                {
+                    AccentState = AccentEnableAcrylicBlurBehind,
+                    AccentFlags = 0,
+                    GradientColor = (LightTrayAcrylicTintAlpha << 24) | 0x00ffffff,
+                    AnimationId = 0
+                };
+                accentMemory = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(AccentPolicy)));
+                Marshal.StructureToPtr(accent, accentMemory, false);
+                var data = new WindowCompositionAttributeData
+                {
+                    Attribute = WcaAccentPolicy,
+                    Data = accentMemory,
+                    SizeOfData = Marshal.SizeOf(typeof(AccentPolicy))
+                };
+                if (SetWindowCompositionAttribute(hWnd, ref data))
+                {
+                    nativeError = 0;
+                    return true;
+                }
+
+                nativeError = Marshal.GetLastWin32Error();
+                return false;
+            }
+            catch
+            {
+                return false;
+            }
+            finally
+            {
+                if (accentMemory != IntPtr.Zero)
+                {
+                    Marshal.FreeHGlobal(accentMemory);
+                }
+            }
+        }
+
         [StructLayout(LayoutKind.Sequential)]
         private struct NativeRect
         {
@@ -82,5 +254,23 @@ namespace WeChatMessageNotifier
             internal int Right;
             internal int Bottom;
         }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct AccentPolicy
+        {
+            internal int AccentState;
+            internal int AccentFlags;
+            internal int GradientColor;
+            internal int AnimationId;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct WindowCompositionAttributeData
+        {
+            internal int Attribute;
+            internal IntPtr Data;
+            internal int SizeOfData;
+        }
+
     }
 }

@@ -4,8 +4,10 @@ $ErrorActionPreference = 'Stop'
 
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $sourceDirectory = Join-Path $root 'src\WeChatMessageNotifier'
+$launcherSourceDirectory = Join-Path $root 'src\WeChatNotifierLauncher'
 $outputDirectory = Join-Path $root 'work\tests'
 $output = Join-Path $outputDirectory 'WeChatMessageNotifier.Tests.exe'
+$launcherOutput = Join-Path $outputDirectory 'WeChatNotifierLauncher.Tests.exe'
 $compiler = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
 $uiaClient = Join-Path $env:WINDIR 'Microsoft.NET\assembly\GAC_MSIL\UIAutomationClient\v4.0_4.0.0.0__31bf3856ad364e35\UIAutomationClient.dll'
 $uiaTypes = Join-Path $env:WINDIR 'Microsoft.NET\assembly\GAC_MSIL\UIAutomationTypes\v4.0_4.0.0.0__31bf3856ad364e35\UIAutomationTypes.dll'
@@ -17,6 +19,7 @@ $windowsRuntime = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\Sy
 $systemRuntime = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\System.Runtime.dll'
 $windowsRuntimeInterop = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\System.Runtime.InteropServices.WindowsRuntime.dll'
 $sources = Get-ChildItem -LiteralPath $sourceDirectory -Filter '*.cs' | Select-Object -ExpandProperty FullName
+$launcherSources = Get-ChildItem -LiteralPath $launcherSourceDirectory -Filter '*.cs' | Select-Object -ExpandProperty FullName
 
 New-Item -ItemType Directory -Force -Path $outputDirectory | Out-Null
 
@@ -48,4 +51,24 @@ if ($LASTEXITCODE -ne 0) {
 & $output --self-test
 if ($LASTEXITCODE -ne 0) {
     throw "Self-tests failed with exit code $LASTEXITCODE."
+}
+
+& $compiler `
+    /nologo `
+    /target:exe `
+    /platform:anycpu `
+    /optimize+ `
+    /out:$launcherOutput `
+    /reference:System.dll `
+    /reference:System.Core.dll `
+    /reference:System.Management.dll `
+    $launcherSources
+
+if ($LASTEXITCODE -ne 0) {
+    throw "Launcher test compilation failed with exit code $LASTEXITCODE."
+}
+
+& $launcherOutput --self-test
+if ($LASTEXITCODE -ne 0) {
+    throw "Launcher self-tests failed with exit code $LASTEXITCODE."
 }

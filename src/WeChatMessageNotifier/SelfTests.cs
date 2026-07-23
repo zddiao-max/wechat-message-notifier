@@ -4,6 +4,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Reflection;
 using System.Text;
 
 namespace WeChatMessageNotifier
@@ -21,7 +22,10 @@ namespace WeChatMessageNotifier
             TestOutgoingFilter(failures);
             TestNotificationAggregation(failures);
             TestSettings(failures);
+            TestPollingIntervals(failures);
+            TestVisualSafety(failures);
             TestToastRequest(failures);
+            TestToastIconFallback(failures);
 
             if (failures.Count == 0)
             {
@@ -43,6 +47,16 @@ namespace WeChatMessageNotifier
                 "Stable group identity was not classified as GroupChat.", failures);
             Expect(group.ContactHash.Length == 16,
                 "New contact hashes are not 16 hexadecimal characters.", failures);
+
+            var groupByName = SessionParser.Parse(
+                "\u56E2\u8D2D\u7FA4\n\u6D88\u606F\n14:58",
+                0,
+                "session_item_no_stable_group_identity");
+            Expect(groupByName != null &&
+                groupByName.Kind == ChatSessionKind.GroupChat &&
+                groupByName.HasGroupMarker,
+                "A session name containing 群 was not classified as GroupChat.",
+                failures);
 
             var unknown = SessionParser.Parse(
                 "\u672A\u6807\u8BB0\u4F1A\u8BDD\n\u6D88\u606F\n10:00",
@@ -253,6 +267,11 @@ namespace WeChatMessageNotifier
             settings.OfficialAccountAllowKeywords.Add("AA");
             settings.OfficialAccountAllowKeywords.Add("AB");
             settings.GroupChatBlockKeywords.Add("\u56E2\u8D2D");
+            settings.PrivacyMode = true;
+            settings.SetSettingsWindowPlacement(
+                new System.Drawing.Rectangle(-1200, 80, 820, 680),
+                true,
+                144);
             NotificationFilterSettings parsed;
             Expect(NotificationFilterSettings.TryParse(settings.ToJson(), out parsed) &&
                 parsed.ResolveKind("a1b2c3d4e5f60708", ChatSessionKind.Unknown) == ChatSessionKind.GroupChat &&
@@ -261,8 +280,20 @@ namespace WeChatMessageNotifier
                 parsed.HasOfficialAccountAllowKeyword("notice AB") &&
                 parsed.HasGroupChatBlockKeyword("\u56E2\u8D2D\u7FA4"),
                 "New session settings did not round-trip.", failures);
+            Expect(parsed.PrivacyMode,
+                "Persistent privacy mode did not round-trip.", failures);
+            Expect(parsed.SettingsWindowBounds.HasValue &&
+                parsed.SettingsWindowBounds.Value.X == -1200 &&
+                parsed.SettingsWindowBounds.Value.Width == 820 &&
+                parsed.SettingsWindowMaximized &&
+                parsed.SettingsWindowDpi == 144,
+                "Settings window placement did not round-trip.", failures);
             Expect(settings.ToJson().IndexOf("\"enable", StringComparison.OrdinalIgnoreCase) < 0,
                 "Retired global type switches were persisted.", failures);
+            var cloned = settings.Clone();
+            Expect(cloned.HasGroupChatBlockKeyword("\u56E2\u8D2D\u7FA4") &&
+                cloned.HasOfficialAccountAllowKeyword("notice AB"),
+                "Settings clone did not preserve keyword rules.", failures);
 
             var legacyProperty = "enable" + "ServiceAccount";
             var legacy = "{\"" + legacyProperty + "\":true,\"sessionKindOverrides\":{" +
@@ -280,12 +311,137 @@ namespace WeChatMessageNotifier
                 var bytes = File.ReadAllBytes(tempPath);
                 Expect(bytes.Length < 3 || bytes[0] != 0xef || bytes[1] != 0xbb || bytes[2] != 0xbf,
                     "Settings file unexpectedly used a UTF-8 BOM.", failures);
+                settings.PrivacyMode = false;
+                Expect(store.Save(settings) && File.Exists(store.BackupPath),
+                    "Settings store did not create an atomic-save backup.", failures);
+                NotificationFilterSettings backup;
+                Expect(NotificationFilterSettings.TryParse(
+                        File.ReadAllText(store.BackupPath, Encoding.UTF8),
+                        out backup) && backup.PrivacyMode,
+                    "Settings backup did not retain the previous valid configuration.",
+                    failures);
+                File.WriteAllText(tempPath, "{invalid", Encoding.UTF8);
+                Expect(store.Load().PrivacyMode,
+                    "Invalid primary settings did not recover the local backup.", failures);
             }
             finally
             {
                 var directory = Path.GetDirectoryName(tempPath);
                 if (Directory.Exists(directory)) Directory.Delete(directory, true);
             }
+        }
+
+        private static void TestPollingIntervals(ICollection<string> failures)
+        {
+            Expect(NotifierApplicationContext.SelectPollInterval(true, 1) ==
+                    NotifierApplicationContext.ActivePollIntervalMilliseconds &&
+                NotifierApplicationContext.SelectPollInterval(false, 0) ==
+                    NotifierApplicationContext.IdlePollIntervalMilliseconds &&
+                NotifierApplicationContext.SelectPollInterval(true, 0) ==
+                    NotifierApplicationContext.IdlePollIntervalMilliseconds,
+                "Adaptive polling intervals were not selected correctly.", failures);
+        }
+
+        private static void TestVisualSafety(ICollection<string> failures)
+        {
+            Expect(NotifierApplicationContext.UsesWinUiSettingsRuntime &&
+                NotifierApplicationContext.UsesWinUiTrayRuntime &&
+                !NotifierApplicationContext.UsesCustomTrayMenuRuntime,
+                "The production path did not select the WinUI settings and tray surfaces.",
+                failures);
+
+            var secondary = Win11Visual.ForceOpaque(
+                System.Drawing.Color.FromArgb(64, 100, 116, 139));
+            var healthy = Win11Visual.ForceOpaque(
+                System.Drawing.Color.FromArgb(16, 22, 101, 52));
+            Expect(secondary.A == 255 && secondary.R == 100 &&
+                    secondary.G == 116 && secondary.B == 139 &&
+                    healthy.A == 255 && healthy.R == 22 &&
+                    healthy.G == 101 && healthy.B == 52,
+                "EnsureOpaqueText helper changed semantic text RGB values.", failures);
+
+            Expect(SettingsForm.UsesStableNativeTextControls &&
+                SettingsForm.UsesNoCustomCardPainting &&
+                SettingsForm.UsesFrameworkDpiAutoScale &&
+                typeof(SettingsForm).GetField(
+                    "keywordCards",
+                    BindingFlags.Instance | BindingFlags.NonPublic) == null &&
+                typeof(NativeMethods).GetMethod(
+                    "DwmExtendFrameIntoClientArea",
+                    BindingFlags.Static | BindingFlags.NonPublic) == null,
+                "Settings did not use the stable native-control/DPI rendering path.",
+                failures);
+
+            Expect(NotifierApplicationContext.UsesWinUiTrayRuntime &&
+                !NotifierApplicationContext.UsesCustomTrayMenuRuntime &&
+                Win11BackdropForm.UsesStableClientErase,
+                "The backend did not keep the WinUI tray surface as its only production menu path.",
+                failures);
+
+            try
+            {
+                // Layout can briefly paint a card at a 1- or 2-pixel size.
+                // The round-rectangle helper must never pass an oversized arc
+                // to GDI+ during that transition.
+                using (var tinyPath = Win11Visual.CreateRoundRect(
+                    new System.Drawing.Rectangle(0, 0, 1, 1), 10))
+                using (var narrowPath = Win11Visual.CreateRoundRect(
+                    new System.Drawing.Rectangle(0, 0, 8, 3), 10))
+                {
+                    Expect(tinyPath.PointCount > 0 && narrowPath.PointCount > 0,
+                        "Round-rectangle fallback did not create a safe paint path.",
+                        failures);
+                }
+            }
+            catch (Exception exception)
+            {
+                Expect(false,
+                    "Round-rectangle fallback threw " + exception.GetType().Name + ".",
+                    failures);
+            }
+
+            var settingsLayoutSelfTest = SettingsForm.RunLayoutStructureSelfTest();
+            var settingsDpiSelfTest = SettingsForm.RunDpiAndEditorSelfTest();
+            var settingsSurfaceSmokeTest = SettingsForm.RunNativeSurfaceSmokeTest();
+            Expect(SettingsForm.UsesResponsiveLayout &&
+                SettingsForm.IsResizable &&
+                SettingsForm.HandlesPerMonitorDpiChanges &&
+                SettingsForm.UsesStableNativeTextControls &&
+                SettingsForm.UsesSingleConstructionPath &&
+                SettingsForm.UsesScrollableContent &&
+                SettingsForm.FooterIsOutsideScrollContent &&
+                SettingsForm.UsesTableLayoutRoot &&
+                SettingsForm.UsesOpaqueClientContainers &&
+                SettingsForm.UsesForcedDpiMetricRefresh &&
+                SettingsForm.UsesFrameworkDpiAutoScale &&
+                SettingsForm.UsesNoCustomCardPainting &&
+                SettingsForm.UsesExplicitEditableKeywordEditors &&
+                SettingsForm.UsesStableFooterButtonTable &&
+                SettingsForm.MinimumLogicalSize.Width >= 680 &&
+                SettingsForm.MinimumLogicalSize.Height >= 620 &&
+                settingsLayoutSelfTest &&
+                settingsDpiSelfTest &&
+                settingsSurfaceSmokeTest &&
+                Win11BackdropForm.ReappliesBackdropForDpiAndScreenChanges &&
+                ActivityLogForm.UsesResponsiveLayout &&
+                ActivityLogForm.HandlesPerMonitorDpiChanges &&
+                ActivityLogForm.UsesStableNativeTextControls &&
+                typeof(NativeMethods).GetMethod(
+                    "GetWindowDpiOrDefault",
+                    BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public) != null,
+                "Settings or activity window did not use the responsive, resizable layout path.",
+                failures);
+
+            Expect(typeof(NativeMethods).GetMethod(
+                    "TryApplyWindows11Acrylic",
+                    BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public) == null,
+                "The retired generic AccentPolicy path remained available.",
+                failures);
+            Expect(typeof(NativeMethods).GetMethod(
+                    "TryApplyLightTrayAcrylic",
+                    BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public) != null,
+                "The dedicated light Acrylic tray path was unavailable.",
+                failures);
         }
 
         private static void TestToastRequest(ICollection<string> failures)
@@ -297,6 +453,34 @@ namespace WeChatMessageNotifier
                 parsed.SessionKey == "session-a" &&
                 parsed.SessionKind == ChatSessionKind.GroupChat,
                 "Toast activation request did not round-trip.", failures);
+        }
+
+        private static void TestToastIconFallback(ICollection<string> failures)
+        {
+            var cachedLogoPath = Path.Combine(
+                Path.GetTempPath(),
+                "WeChatMessageNotifier-" + Guid.NewGuid().ToString("N") + ".png");
+            try
+            {
+                File.WriteAllBytes(cachedLogoPath, new byte[] { 0 });
+                Expect(string.Equals(
+                        WindowsNotificationCenter.SelectExistingToastLogoForTest(
+                            null,
+                            cachedLogoPath),
+                        cachedLogoPath,
+                        StringComparison.OrdinalIgnoreCase),
+                    "Cached toast logo was not retained when WeChat was unavailable.",
+                    failures);
+                Expect(WindowsNotificationCenter.SelectExistingToastLogoForTest(
+                           null,
+                           cachedLogoPath + ".missing") == null,
+                    "Missing cached toast logo was treated as available.",
+                    failures);
+            }
+            finally
+            {
+                if (File.Exists(cachedLogoPath)) File.Delete(cachedLogoPath);
+            }
         }
 
         private static ChatSession CreateSession(

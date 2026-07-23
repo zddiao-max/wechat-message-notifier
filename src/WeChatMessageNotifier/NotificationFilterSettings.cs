@@ -3,6 +3,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Drawing;
 using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -45,6 +46,58 @@ namespace WeChatMessageNotifier
         internal IList<string> OfficialAccountAllowKeywords { get; private set; }
 
         internal IList<string> GroupChatBlockKeywords { get; private set; }
+
+        // Stored with the filter settings because it controls how the same
+        // locally generated Windows notifications expose message summaries.
+        internal bool PrivacyMode { get; set; }
+
+        // UI placement is local, non-sensitive state. Keeping it alongside
+        // the existing local settings lets the resizable settings window
+        // return to a usable size without storing any conversation data.
+        internal Rectangle? SettingsWindowBounds { get; private set; }
+
+        internal bool SettingsWindowMaximized { get; private set; }
+
+        // Bounds are physical pixels, so retain the source DPI as well.
+        // This lets a normal (non-maximized) window restore at an equivalent
+        // logical size after it moves to a different-DPI display.
+        internal int SettingsWindowDpi { get; private set; }
+
+        internal void SetSettingsWindowPlacement(
+            Rectangle bounds,
+            bool maximized)
+        {
+            SetSettingsWindowPlacement(bounds, maximized, 96);
+        }
+
+        internal void SetSettingsWindowPlacement(
+            Rectangle bounds,
+            bool maximized,
+            int dpi)
+        {
+            if (bounds.Width < 100 || bounds.Height < 100)
+            {
+                return;
+            }
+
+            SettingsWindowBounds = bounds;
+            SettingsWindowMaximized = maximized;
+            SettingsWindowDpi = dpi >= 96 && dpi <= 960 ? dpi : 96;
+        }
+
+        internal void CopySettingsWindowPlacementFrom(
+            NotificationFilterSettings source)
+        {
+            if (source == null || !source.SettingsWindowBounds.HasValue)
+            {
+                return;
+            }
+
+            SetSettingsWindowPlacement(
+                source.SettingsWindowBounds.Value,
+                source.SettingsWindowMaximized,
+                source.SettingsWindowDpi);
+        }
 
         internal bool HasServiceAccountAllowKeyword(string preview)
         {
@@ -124,6 +177,17 @@ namespace WeChatMessageNotifier
             CopyKeywords(source.ServiceAccountAllowKeywords, ServiceAccountAllowKeywords);
             CopyKeywords(source.OfficialAccountAllowKeywords, OfficialAccountAllowKeywords);
             CopyKeywords(source.GroupChatBlockKeywords, GroupChatBlockKeywords);
+            PrivacyMode = source.PrivacyMode;
+            SettingsWindowBounds = source.SettingsWindowBounds;
+            SettingsWindowMaximized = source.SettingsWindowMaximized;
+            SettingsWindowDpi = source.SettingsWindowDpi;
+        }
+
+        internal NotificationFilterSettings Clone()
+        {
+            var clone = new NotificationFilterSettings();
+            clone.ApplyFrom(this);
+            return clone;
         }
 
         internal string ToJson()
@@ -151,6 +215,10 @@ namespace WeChatMessageNotifier
                 builder,
                 "groupChatBlockKeywords",
                 GroupChatBlockKeywords);
+            builder.AppendLine(",");
+            builder.Append("  \"privacyMode\": ");
+            builder.AppendLine(PrivacyMode ? "true," : "false,");
+            AppendSettingsWindowPlacement(builder);
             builder.AppendLine();
             builder.AppendLine("}");
             return builder.ToString();
@@ -167,6 +235,7 @@ namespace WeChatMessageNotifier
                 !trimmed.EndsWith("}", StringComparison.Ordinal)) return false;
 
             var parsed = new NotificationFilterSettings();
+            bool privacyMode;
             if (!TryParseKinds(json, parsed) ||
                 !TryParseNotificationOverrides(json, parsed) ||
                 !TryParseKeywords(
@@ -180,11 +249,61 @@ namespace WeChatMessageNotifier
                 !TryParseKeywords(
                     json,
                     "groupChatBlockKeywords",
-                    parsed.GroupChatBlockKeywords))
+                    parsed.GroupChatBlockKeywords) ||
+                !TryParseBoolean(json, "privacyMode", out privacyMode) ||
+                !TryParseSettingsWindowPlacement(json, parsed))
             {
                 return false;
             }
+            parsed.PrivacyMode = privacyMode;
             settings = parsed;
+            return true;
+        }
+
+        private static bool TryParseSettingsWindowPlacement(
+            string json,
+            NotificationFilterSettings parsed)
+        {
+            var match = Regex.Match(
+                json,
+                "\\\"settingsWindow\\\"\\s*:\\s*\\{\\s*" +
+                "\\\"x\\\"\\s*:\\s*(?<x>-?\\d+)\\s*,\\s*" +
+                "\\\"y\\\"\\s*:\\s*(?<y>-?\\d+)\\s*,\\s*" +
+                "\\\"width\\\"\\s*:\\s*(?<width>\\d+)\\s*,\\s*" +
+                "\\\"height\\\"\\s*:\\s*(?<height>\\d+)\\s*,\\s*" +
+                "\\\"maximized\\\"\\s*:\\s*(?<maximized>true|false)" +
+                "(?:\\s*,\\s*\\\"dpi\\\"\\s*:\\s*(?<dpi>\\d+))?\\s*\\}",
+                RegexOptions.IgnoreCase | RegexOptions.CultureInvariant |
+                RegexOptions.Singleline);
+            if (!match.Success)
+            {
+                return json.IndexOf("\"settingsWindow\"", StringComparison.OrdinalIgnoreCase) < 0 ||
+                    Regex.IsMatch(
+                        json,
+                        "\\\"settingsWindow\\\"\\s*:\\s*null",
+                        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+            }
+
+            int x;
+            int y;
+            int width;
+            int height;
+            int dpi;
+            bool maximized;
+            if (!int.TryParse(match.Groups["x"].Value, out x) ||
+                !int.TryParse(match.Groups["y"].Value, out y) ||
+                !int.TryParse(match.Groups["width"].Value, out width) ||
+                !int.TryParse(match.Groups["height"].Value, out height) ||
+                !bool.TryParse(match.Groups["maximized"].Value, out maximized) ||
+                width < 100 || height < 100)
+            {
+                return false;
+            }
+
+            parsed.SetSettingsWindowPlacement(
+                new Rectangle(x, y, width, height),
+                maximized,
+                int.TryParse(match.Groups["dpi"].Value, out dpi) ? dpi : 96);
             return true;
         }
 
@@ -291,6 +410,25 @@ namespace WeChatMessageNotifier
             return true;
         }
 
+        private static bool TryParseBoolean(
+            string json,
+            string propertyName,
+            out bool value)
+        {
+            value = false;
+            var match = Regex.Match(
+                json,
+                "\"" + Regex.Escape(propertyName) + "\"\\s*:\\s*(?<value>true|false)",
+                RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+            if (match.Success)
+            {
+                return bool.TryParse(match.Groups["value"].Value, out value);
+            }
+
+            // Older settings files legitimately have no privacy field.
+            return json.IndexOf("\"" + propertyName + "\"", StringComparison.OrdinalIgnoreCase) < 0;
+        }
+
         private static void AppendDictionary<TValue>(
             StringBuilder builder,
             string propertyName,
@@ -336,6 +474,28 @@ namespace WeChatMessageNotifier
                 builder.AppendLine(index + 1 < normalized.Length ? "," : string.Empty);
             }
             builder.Append("  ]");
+        }
+
+        private void AppendSettingsWindowPlacement(StringBuilder builder)
+        {
+            if (!SettingsWindowBounds.HasValue)
+            {
+                builder.AppendLine("  \"settingsWindow\": null");
+                return;
+            }
+
+            var bounds = SettingsWindowBounds.Value;
+            builder.AppendLine("  \"settingsWindow\": {");
+            builder.AppendLine("    \"x\": " + bounds.X + ",");
+            builder.AppendLine("    \"y\": " + bounds.Y + ",");
+            builder.AppendLine("    \"width\": " + bounds.Width + ",");
+            builder.AppendLine("    \"height\": " + bounds.Height + ",");
+            builder.AppendLine(
+                "    \"maximized\": " +
+                (SettingsWindowMaximized ? "true," : "false,"));
+            builder.AppendLine("    \"dpi\": " +
+                (SettingsWindowDpi >= 96 ? SettingsWindowDpi : 96));
+            builder.AppendLine("  }");
         }
 
         private static bool ContainsKeyword(

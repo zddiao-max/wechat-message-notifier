@@ -1,0 +1,84 @@
+<Window
+    x:Class="WeChatMessageNotifier.WinUI.TrayWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    Title="微信消息提醒器">
+
+    <Grid x:Name="MenuRoot" Background="Transparent" Padding="8">
+        <Grid.Resources>
+            <Style x:Key="TrayCommandStyle" TargetType="Button">
+                <Setter Property="HorizontalAlignment" Value="Stretch" />
+                <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                <Setter Property="Background" Value="Transparent" />
+                <Setter Property="BorderBrush" Value="Transparent" />
+                <Setter Property="BorderThickness" Value="1" />
+                <Setter Property="CornerRadius" Value="8" />
+                <Setter Property="Padding" Value="14,9" />
+                <Setter Property="Margin" Value="0,1" />
+            </Style>
+        </Grid.Resources>
+        <Border Background="#36FFFFFF"
+                BorderBrush="#5CFFFFFF"
+                BorderThickness="1"
+                CornerRadius="12"
+                Padding="8">
+            <ScrollViewer HorizontalScrollBarVisibility="Disabled"
+                          VerticalScrollBarVisibility="Auto">
+                <!-- The code-behind moves these existing elements between Grid cells.
+                     It never recreates a command or a control during resize. -->
+                <Grid x:Name="MenuLayout" RowSpacing="8" ColumnSpacing="8" Padding="4">
+                    <StackPanel x:Name="StatusPanel"
+                                Orientation="Horizontal"
+                                Spacing="9"
+                                Padding="8,7">
+                        <SymbolIcon Symbol="Message" />
+                        <TextBlock x:Name="StatusText"
+                                   TextTrimming="CharacterEllipsis"
+                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    </StackPanel>
+
+                    <Button x:Name="OpenSettingsButton"
+                            Style="{StaticResource TrayCommandStyle}"
+                            Tag="open-settings"
+                            Click="CommandButton_Click">
+                        <StackPanel Orientation="Horizontal" Spacing="12"><SymbolIcon Symbol="Setting" /><TextBlock Text="打开设置…" /></StackPanel>
+                    </Button>
+                    <Button x:Name="PauseButton"
+                            Style="{StaticResource TrayCommandStyle}"
+                            Tag="toggle-pause"
+                            Click="CommandButton_Click">
+                        <StackPanel Orientation="Horizontal" Spacing="12"><SymbolIcon x:Name="PauseIcon" Symbol="Pause" /><TextBlock x:Name="PauseText" /></StackPanel>
+                    </Button>
+                    <Button x:Name="PrivacyButton"
+                            Style="{StaticResource TrayCommandStyle}"
+                            Tag="toggle-privacy"
+                            Click="CommandButton_Click">
+                        <StackPanel Orientation="Horizontal" Spacing="12"><FontIcon Glyph="&#xE72E;" FontFamily="Segoe Fluent Icons" /><TextBlock x:Name="PrivacyText" /></StackPanel>
+                    </Button>
+
+                    <Expander x:Name="NotificationExpander" HorizontalAlignment="Stretch">
+                        <Expander.Header><StackPanel Orientation="Horizontal" Spacing="12"><SymbolIcon Symbol="Message" /><TextBlock Text="通知与测试" /></StackPanel></Expander.Header>
+                        <StackPanel Padding="16,2,0,2">
+                            <Button Style="{StaticResource TrayCommandStyle}" Tag="send-test" Click="CommandButton_Click"><StackPanel Orientation="Horizontal" Spacing="12"><SymbolIcon Symbol="Message" /><TextBlock Text="发送测试通知" /></StackPanel></Button>
+                            <Button Style="{StaticResource TrayCommandStyle}" Tag="open-notification-duration" Click="CommandButton_Click"><StackPanel Orientation="Horizontal" Spacing="12"><SymbolIcon Symbol="Clock" /><TextBlock Text="打开 Windows 通知时长设置" /></StackPanel></Button>
+                        </StackPanel>
+                    </Expander>
+                    <Expander x:Name="DiagnosticExpander" HorizontalAlignment="Stretch">
+                        <Expander.Header><StackPanel Orientation="Horizontal" Spacing="12"><SymbolIcon Symbol="Help" /><TextBlock Text="诊断与文件" /></StackPanel></Expander.Header>
+                        <StackPanel Padding="16,2,0,2">
+                            <Button Style="{StaticResource TrayCommandStyle}" Tag="toggle-diagnostic-next" Click="CommandButton_Click"><StackPanel Orientation="Horizontal" Spacing="12"><SymbolIcon Symbol="View" /><TextBlock Text="下一次提醒显示分类" /></StackPanel></Button>
+                            <Button Style="{StaticResource TrayCommandStyle}" Tag="log-wechat-windows" Click="CommandButton_Click"><StackPanel Orientation="Horizontal" Spacing="12"><SymbolIcon Symbol="Document" /><TextBlock Text="记录微信窗口结构" /></StackPanel></Button>
+                            <Button Style="{StaticResource TrayCommandStyle}" Tag="open-settings-file" Click="CommandButton_Click"><StackPanel Orientation="Horizontal" Spacing="12"><SymbolIcon Symbol="Document" /><TextBlock Text="打开设置文件" /></StackPanel></Button>
+                            <Button Style="{StaticResource TrayCommandStyle}" Tag="open-log" Click="CommandButton_Click"><StackPanel Orientation="Horizontal" Spacing="12"><SymbolIcon Symbol="Folder" /><TextBlock Text="打开日志" /></StackPanel></Button>
+                        </StackPanel>
+                    </Expander>
+
+                    <Button x:Name="ExitButton"
+                            Style="{StaticResource TrayCommandStyle}"
+                            Tag="exit"
+                            Click="CommandButton_Click"><StackPanel Orientation="Horizontal" Spacing="12"><FontIcon Glyph="&#xE8BB;" FontFamily="Segoe Fluent Icons" /><TextBlock Text="退出提醒器" /></StackPanel></Button>
+                </Grid>
+            </ScrollViewer>
+        </Border>
+    </Grid>
+</Window>

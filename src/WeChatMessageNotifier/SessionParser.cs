@@ -44,6 +44,7 @@ namespace WeChatMessageNotifier
         private const string SubscriptionAccountLabel = "\u8BA2\u9605\u53F7";
         private const string OfficialAccountLabel = "\u516C\u4F17\u53F7";
         private const string GroupChatLabel = "\u7FA4\u804A";
+        private const string GroupNameMarker = "\u7FA4";
 
         internal static ChatSession Parse(
             string rawName,
@@ -155,7 +156,13 @@ namespace WeChatMessageNotifier
             var hasGroupMarker =
                 HasStableGroupId(sessionKey) ||
                 HasStableGroupId(automationId) ||
-                ContainsExactLine(lines, GroupChatLabel);
+                ContainsExactLine(lines, GroupChatLabel) ||
+                // Project policy: the owner treats every session name
+                // containing the Chinese character "群" as a group.  This
+                // intentionally supplements the incomplete WeChat UIA
+                // identity, so configured group-name block keywords still
+                // apply when AutomationId does not contain @chatroom.
+                contact.IndexOf(GroupNameMarker, StringComparison.Ordinal) >= 0;
             var kind = Classify(
                 hasServiceLabel,
                 hasOfficialMarker,

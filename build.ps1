@@ -4,8 +4,12 @@ $ErrorActionPreference = 'Stop'
 
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $sourceDirectory = Join-Path $root 'src\WeChatMessageNotifier'
+$launcherSourceDirectory = Join-Path $root 'src\WeChatNotifierLauncher'
+$settingsUiProject = Join-Path $root 'src\WeChatMessageNotifier.WinUI\WeChatMessageNotifier.WinUI.csproj'
 $outputDirectory = Join-Path $root 'outputs\WeChatMessageNotifier'
 $output = Join-Path $outputDirectory 'WeChatMessageNotifier.exe'
+$launcherOutput = Join-Path $outputDirectory 'WeChatNotifierLauncher.exe'
+$settingsUiOutputDirectory = Join-Path $outputDirectory 'SettingsUi'
 $compiler = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
 $uiaClient = Join-Path $env:WINDIR 'Microsoft.NET\assembly\GAC_MSIL\UIAutomationClient\v4.0_4.0.0.0__31bf3856ad364e35\UIAutomationClient.dll'
 $uiaTypes = Join-Path $env:WINDIR 'Microsoft.NET\assembly\GAC_MSIL\UIAutomationTypes\v4.0_4.0.0.0__31bf3856ad364e35\UIAutomationTypes.dll'
@@ -18,6 +22,7 @@ $systemRuntime = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\Sys
 $windowsRuntimeInterop = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\System.Runtime.InteropServices.WindowsRuntime.dll'
 $manifest = Join-Path $sourceDirectory 'app.manifest'
 $sources = Get-ChildItem -LiteralPath $sourceDirectory -Filter '*.cs' | Select-Object -ExpandProperty FullName
+$launcherSources = Get-ChildItem -LiteralPath $launcherSourceDirectory -Filter '*.cs' | Select-Object -ExpandProperty FullName
 
 New-Item -ItemType Directory -Force -Path $outputDirectory | Out-Null
 
@@ -47,6 +52,38 @@ if ($LASTEXITCODE -ne 0) {
     throw "Compilation failed with exit code $LASTEXITCODE."
 }
 
+& $compiler `
+    /nologo `
+    /target:winexe `
+    /platform:anycpu `
+    /optimize+ `
+    /out:$launcherOutput `
+    /reference:System.dll `
+    /reference:System.Core.dll `
+    /reference:System.Management.dll `
+    $launcherSources
+
+if ($LASTEXITCODE -ne 0) {
+    throw "Launcher compilation failed with exit code $LASTEXITCODE."
+}
+
+# The modern settings surface is deliberately a separate WinUI 3 executable.
+# It keeps the proven .NET Framework monitor and Windows-toast path untouched,
+# while WindowsAppSDK supplies compositor-backed Mica and Per-Monitor-V2 DPI.
+# Self-contained publish avoids a runtime-version dependency on the user's PC.
+& dotnet publish $settingsUiProject `
+    --configuration Release `
+    --runtime win-x64 `
+    --self-contained true `
+    -p:PublishTrimmed=false `
+    -p:WindowsAppSDKSelfContained=true `
+    --output $settingsUiOutputDirectory `
+    --nologo
+
+if ($LASTEXITCODE -ne 0) {
+    throw "WinUI settings publish failed with exit code $LASTEXITCODE."
+}
+
 Copy-Item -LiteralPath (Join-Path $root 'LICENSE') `
     -Destination (Join-Path $outputDirectory 'LICENSE') `
     -Force
@@ -55,3 +92,4 @@ Copy-Item -LiteralPath (Join-Path $root 'NOTICE.md') `
     -Force
 
 Write-Output $output
+Write-Output $launcherOutput

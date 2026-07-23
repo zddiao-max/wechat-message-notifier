@@ -1,0 +1,131 @@
+<Window
+    x:Class="WeChatMessageNotifier.WinUI.SettingsWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:local="using:WeChatMessageNotifier.WinUI"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d"
+    Title="设置 · 微信消息提醒器">
+
+    <Grid x:Name="RootGrid" Background="Transparent">
+        <Grid.Resources>
+            <Style x:Key="SettingsCardStyle" TargetType="Border">
+                <Setter Property="Background" Value="{ThemeResource CardBackgroundFillColorDefaultBrush}" />
+                <Setter Property="BorderBrush" Value="{ThemeResource CardStrokeColorDefaultBrush}" />
+                <Setter Property="BorderThickness" Value="1" />
+                <Setter Property="CornerRadius" Value="12" />
+                <Setter Property="Padding" Value="20" />
+            </Style>
+            <Style x:Key="NotifierAccentButtonStyle" TargetType="Button" BasedOn="{StaticResource AccentButtonStyle}">
+                <Setter Property="MinWidth" Value="112" />
+            </Style>
+        </Grid.Resources>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <Grid x:Name="AppTitleBar" Grid.Row="0" Padding="28,18,28,18" ColumnSpacing="24">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <StackPanel Spacing="4">
+                <TextBlock Text="微信消息提醒器" Style="{ThemeResource TitleTextBlockStyle}" />
+                <TextBlock Text="Windows 系统通知 · 本地规则与隐私设置"
+                           Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+            </StackPanel>
+            <InfoBar x:Name="StateInfoBar"
+                     Grid.Column="1"
+                     IsOpen="True"
+                     IsClosable="False"
+                     Severity="Success"
+                     Title="本地设置"
+                     Message="由提醒器自动同步" />
+        </Grid>
+
+        <ScrollViewer Grid.Row="1"
+                      HorizontalScrollBarVisibility="Disabled"
+                      VerticalScrollBarVisibility="Auto"
+                      Padding="28,0,28,16">
+            <StackPanel x:Name="ContentPanel" Spacing="16" MaxWidth="1440" HorizontalAlignment="Center">
+                <Grid x:Name="CardsGrid" RowSpacing="16" ColumnSpacing="16">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+                <Border x:Name="ServiceKeywordsCard" Style="{StaticResource SettingsCardStyle}" HorizontalAlignment="Stretch">
+                    <StackPanel Spacing="10">
+                        <TextBlock Text="服务号提醒关键词" Style="{ThemeResource SubtitleTextBlockStyle}" />
+                        <TextBlock Text="消息摘要命中任一词时提醒；每行一个关键词。"
+                                   TextWrapping="Wrap"
+                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                        <TextBox x:Name="ServiceKeywordsTextBox"
+                                 AcceptsReturn="True"
+                                 TextWrapping="Wrap"
+                                 MinHeight="104"
+                                 ScrollViewer.VerticalScrollBarVisibility="Auto"
+                                 PlaceholderText="例如：银行" />
+                    </StackPanel>
+                </Border>
+
+                <Border x:Name="OfficialKeywordsCard" Style="{StaticResource SettingsCardStyle}" HorizontalAlignment="Stretch">
+                    <StackPanel Spacing="10">
+                        <TextBlock Text="公众号提醒关键词" Style="{ThemeResource SubtitleTextBlockStyle}" />
+                        <TextBlock Text="公众号默认不提醒，只有摘要命中这些词才提醒。"
+                                   TextWrapping="Wrap"
+                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                        <TextBox x:Name="OfficialKeywordsTextBox"
+                                 AcceptsReturn="True"
+                                 TextWrapping="Wrap"
+                                 MinHeight="104"
+                                 ScrollViewer.VerticalScrollBarVisibility="Auto"
+                                 PlaceholderText="例如：医院" />
+                    </StackPanel>
+                </Border>
+
+                <Border x:Name="GroupKeywordsCard" Style="{StaticResource SettingsCardStyle}" HorizontalAlignment="Stretch">
+                    <StackPanel Spacing="10">
+                        <TextBlock Text="群聊屏蔽关键词" Style="{ThemeResource SubtitleTextBlockStyle}" />
+                        <TextBlock Text="名称含“群”的会话视为群聊；命中任一词时不提醒。"
+                                   TextWrapping="Wrap"
+                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                        <TextBox x:Name="GroupKeywordsTextBox"
+                                 AcceptsReturn="True"
+                                 TextWrapping="Wrap"
+                                 MinHeight="104"
+                                 ScrollViewer.VerticalScrollBarVisibility="Auto"
+                                 PlaceholderText="例如：团购" />
+                    </StackPanel>
+                </Border>
+                </Grid>
+
+                <ToggleSwitch x:Name="PrivacyModeToggle"
+                              Header="隐私模式"
+                              OffContent="通知显示联系人和消息摘要"
+                              OnContent="通知仅显示联系人" />
+            </StackPanel>
+        </ScrollViewer>
+
+        <Grid Grid.Row="2" Padding="28,16,28,24" ColumnSpacing="12">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <TextBlock x:Name="SaveHintText"
+                       VerticalAlignment="Center"
+                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                       Text="保存后，提醒器将在下一次轮询中读取新规则。" />
+            <Button Grid.Column="1" Content="取消" Click="CancelButton_Click" />
+            <Button Grid.Column="2"
+                    Content="保存设置"
+                    Style="{StaticResource NotifierAccentButtonStyle}"
+                    Click="SaveButton_Click" />
+        </Grid>
+    </Grid>
+</Window>

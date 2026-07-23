@@ -2,6 +2,7 @@
 // under the direction of the project owner.
 
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
 using System.IO;
@@ -14,6 +15,26 @@ namespace WeChatMessageNotifier
     {
         internal const string WindowsNotificationDurationSettingsUri =
             "ms-settings:easeofaccess-visualeffects";
+        internal const int ActivePollIntervalMilliseconds = 1500;
+        internal const int IdlePollIntervalMilliseconds = 5000;
+
+        // NotifyIcon has no ContextMenuStrip on the production path. Right
+        // clicks are routed to the WinUI 3 tray surface, which owns its
+        // Acrylic and Per-Monitor-V2 rendering.
+        internal static bool UsesCustomTrayMenuRuntime
+        {
+            get { return false; }
+        }
+
+        internal static bool UsesWinUiTrayRuntime
+        {
+            get { return true; }
+        }
+
+        internal static bool UsesWinUiSettingsRuntime
+        {
+            get { return true; }
+        }
 
         // The tray application owns all timers and UI objects on one STA thread,
         // avoiding cross-thread access to WinForms and UI Automation objects.
@@ -23,17 +44,27 @@ namespace WeChatMessageNotifier
         private readonly NotifyIcon trayIcon;
         private readonly Timer pollTimer;
         private readonly Timer activationTimer;
+        private readonly Timer uiCommandTimer;
         private readonly EventWaitHandle activationEvent;
-        private readonly ToolStripMenuItem pauseItem;
-        private readonly ToolStripMenuItem privacyItem;
-        private readonly ToolStripMenuItem diagnosticNextItem;
-        private readonly ToolStripMenuItem diagnosticWeChatWindowsItem;
+        private readonly TrayMenuEntry pauseItem;
+        private readonly TrayMenuEntry privacyItem;
+        private readonly TrayMenuEntry diagnosticNextItem;
+        private readonly TrayMenuEntry diagnosticWeChatWindowsItem;
+        private readonly TrayMenuEntry statusItem;
         private readonly NotificationFilterSettings notificationFilters;
         private readonly SettingsStore settingsStore;
+        private readonly string trayCommandPath;
+        private readonly Icon trayVisualIcon;
+        private readonly Queue<NotificationActivityRecord> recentActivity =
+            new Queue<NotificationActivityRecord>();
+        private const int RecentActivityCapacity = 30;
         private bool paused;
         private bool privacyMode;
         private bool suppressWhenWeChatForeground;
         private ToastActivationRequest pendingActivationRequest;
+        private Process settingsUiProcess;
+        private Process trayUiProcess;
+        private string monitoringState = "状态：等待首次扫描";
 
         internal NotifierApplicationContext(
             string[] args,
@@ -42,6 +73,9 @@ namespace WeChatMessageNotifier
             this.activationEvent = activationEvent;
             logger = new Logger();
             settingsStore = new SettingsStore(logger);
+            trayCommandPath = Path.Combine(
+                Path.GetDirectoryName(settingsStore.Path),
+                "ui-command.txt");
             notificationFilters = settingsStore.Load();
             // Persist the active schema once so legacy popup/motion fields and
             // retired type switches disappear without touching hash-only rules.
@@ -54,7 +88,8 @@ namespace WeChatMessageNotifier
                 Program.ExtractToastActivationRequest(args) ??
                 Program.ReadActivationPayload();
 
-            privacyMode = HasArgument(args, "--privacy");
+            privacyMode = notificationFilters.PrivacyMode || HasArgument(args, "--privacy");
+            notificationFilters.PrivacyMode = privacyMode;
             // A notification click brings WeChat to the foreground. Suppressing
             // every later message in that state can hide messages from other
             // conversations, so foreground notifications are enabled by
@@ -63,114 +98,42 @@ namespace WeChatMessageNotifier
                 HasArgument(args, "--suppress-foreground") &&
                 !HasArgument(args, "--notify-foreground");
 
-            pauseItem = new ToolStripMenuItem("暂停监控");
-            pauseItem.Click += delegate
-            {
-                paused = !paused;
-                pauseItem.Text = paused ? "继续监控" : "暂停监控";
-                trayIcon.Text = paused ? "微信消息提醒器（已暂停）" : "微信消息提醒器";
-            };
+            pauseItem = new TrayMenuEntry("\u6682\u505c\u76d1\u63a7", delegate { TogglePause(); });
 
-            privacyItem = new ToolStripMenuItem("隐私模式（仅显示联系人）")
-            {
-                Checked = privacyMode,
-                CheckOnClick = true
-            };
-            privacyItem.CheckedChanged += delegate
-            {
-                privacyMode = privacyItem.Checked;
-            };
+            privacyItem = new TrayMenuEntry("\u9690\u79c1\u6a21\u5f0f\uff08\u4ec5\u663e\u793a\u8054\u7cfb\u4eba\uff09", delegate { TogglePrivacy(); });
+            privacyItem.IsChecked = privacyMode;
 
-            var testItem = new ToolStripMenuItem("发送测试通知");
-            testItem.Click += delegate
-            {
-                notificationCenter.Show(
-                    "微信消息提醒器",
-                    "测试成功：Windows 系统通知工作正常。",
-                    false);
-            };
-
-            var notificationDurationSettingsItem =
-                new ToolStripMenuItem("打开 Windows 通知时长设置");
-            notificationDurationSettingsItem.Click += delegate
-            {
-                OpenWindowsNotificationDurationSettings();
-            };
-
-            var logItem = new ToolStripMenuItem("打开日志");
-            logItem.Click += delegate
-            {
-                try
-                {
-                    Process.Start("explorer.exe", "/select,\"" + logger.Path + "\"");
-                }
-                catch (Exception exception)
-                {
-                    logger.Error("Could not open log file", exception);
-                }
-            };
-
-            diagnosticNextItem = new ToolStripMenuItem(
-                "\u4E0B\u4E00\u6B21\u63D0\u9192\u663E\u793A\u5206\u7C7B")
-            {
-                CheckOnClick = true
-            };
-
-            diagnosticWeChatWindowsItem = new ToolStripMenuItem(
-                "\u8BB0\u5F55\u5FAE\u4FE1\u7A97\u53E3\u7ED3\u6784");
-            diagnosticWeChatWindowsItem.Click += delegate { monitor.LogWindowStructure(); };
-            var settingsItem = new ToolStripMenuItem(
-                "\u6253\u5F00\u8BBE\u7F6E\u6587\u4EF6");
-            settingsItem.Click += delegate
-            {
-                try
-                {
-                    settingsStore.Save(notificationFilters);
-                    Process.Start(
-                        "notepad.exe",
-                        "\"" + settingsStore.Path + "\"");
-                }
-                catch (Exception exception)
-                {
-                    logger.Error("Could not open settings file", exception);
-                }
-            };
-
-            var diagnosticItem = new ToolStripMenuItem("\u8BCA\u65AD");
-            diagnosticItem.DropDownItems.Add(diagnosticNextItem);
-            diagnosticItem.DropDownItems.Add(diagnosticWeChatWindowsItem);
-            diagnosticItem.DropDownItems.Add(settingsItem);
-            diagnosticItem.DropDownItems.Add(logItem);
-
-            var exitItem = new ToolStripMenuItem("退出");
-            exitItem.Click += delegate { Exit(); };
-
-            var menu = new ContextMenuStrip();
-            menu.Items.Add(pauseItem);
-            menu.Items.Add(privacyItem);
-            menu.Items.Add(diagnosticItem);
-            menu.Items.Add(new ToolStripSeparator());
-            menu.Items.Add(testItem);
-            menu.Items.Add(notificationDurationSettingsItem);
-            menu.Items.Add(new ToolStripSeparator());
-            menu.Items.Add(exitItem);
+            diagnosticNextItem = new TrayMenuEntry(
+                "\u4e0b\u4e00\u6b21\u63d0\u9192\u663e\u793a\u5206\u7c7b", delegate { ToggleDiagnosticNext(); });
+            diagnosticWeChatWindowsItem = new TrayMenuEntry(
+                "\u8bb0\u5f55\u5fae\u4fe1\u7a97\u53e3\u7ed3\u6784",
+                delegate { monitor.LogWindowStructure(); });
+            statusItem = new TrayMenuEntry(string.Empty, null) { Enabled = false };
+            RefreshTrayStatus();
 
             trayIcon = new NotifyIcon
             {
-                Icon = SystemIcons.Information,
+                Icon = trayVisualIcon = LoadTrayIcon(),
                 Text = "微信消息提醒器",
-                Visible = true,
-                ContextMenuStrip = menu
+                Visible = true
+            };
+            trayIcon.MouseUp += delegate(object sender, MouseEventArgs eventArgs)
+            {
+                if (eventArgs.Button == MouseButtons.Right)
+                {
+                    ShowWinUiTrayMenu(Cursor.Position);
+                }
             };
             trayIcon.DoubleClick += delegate
             {
-                notificationCenter.Show(
-                    "微信消息提醒器",
-                    "程序正在监控微信会话列表。",
-                    false);
+                OpenSettingsWindow();
             };
 
-            pollTimer = new Timer { Interval = 1500 };
+            uiCommandTimer = new Timer { Interval = 300 };
+            uiCommandTimer.Tick += delegate { ProcessWinUiCommand(); };
+            uiCommandTimer.Start();
+
+            pollTimer = new Timer { Interval = ActivePollIntervalMilliseconds };
             pollTimer.Tick += Poll;
             pollTimer.Start();
 
@@ -193,6 +156,280 @@ namespace WeChatMessageNotifier
             logger.Info("Notification delivery uses Windows system notifications only.");
         }
 
+        private void OpenSettingsWindow()
+        {
+            try
+            {
+                var settingsUiPath = Path.Combine(
+                    AppDomain.CurrentDomain.BaseDirectory,
+                    "SettingsUi",
+                    "WeChatMessageNotifier.WinUI.exe");
+                if (!File.Exists(settingsUiPath))
+                {
+                    throw new FileNotFoundException(
+                        "Modern settings UI was not found. Rebuild or reinstall the notifier.",
+                        settingsUiPath);
+                }
+                EnsureWinUiWindowIcon(Path.GetDirectoryName(settingsUiPath));
+
+                if (settingsUiProcess != null && !settingsUiProcess.HasExited)
+                {
+                    var handle = settingsUiProcess.MainWindowHandle;
+                    if (handle != IntPtr.Zero)
+                    {
+                        NativeMethods.ShowWindow(handle, NativeMethods.SwRestore);
+                        NativeMethods.SetForegroundWindow(handle);
+                    }
+                    return;
+                }
+
+                settingsUiProcess = Process.Start(new ProcessStartInfo
+                {
+                    FileName = settingsUiPath,
+                    Arguments = "--settings-path " + QuoteArgument(settingsStore.Path) +
+                        " --monitoring-state " + QuoteArgument(monitoringState),
+                    WorkingDirectory = Path.GetDirectoryName(settingsUiPath),
+                    UseShellExecute = false
+                });
+                logger.Info("Opened the WinUI settings window.");
+            }
+            catch (Exception exception)
+            {
+                logger.Error("Could not open settings window", exception);
+                MessageBox.Show(
+                    "无法打开设置窗口。请查看提醒器日志中的错误详情。",
+                    "微信消息提醒器",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+            }
+        }
+
+        private static string QuoteArgument(string value)
+        {
+            return "\"" + (value ?? string.Empty).Replace("\"", "\\\"") + "\"";
+        }
+
+        private void ShowWinUiTrayMenu(Point cursorPosition)
+        {
+            try
+            {
+                if (trayUiProcess != null && !trayUiProcess.HasExited)
+                {
+                    return;
+                }
+
+                var uiPath = Path.Combine(
+                    AppDomain.CurrentDomain.BaseDirectory,
+                    "SettingsUi",
+                    "WeChatMessageNotifier.WinUI.exe");
+                if (!File.Exists(uiPath))
+                {
+                    throw new FileNotFoundException("Modern tray UI was not found.", uiPath);
+                }
+                EnsureWinUiWindowIcon(Path.GetDirectoryName(uiPath));
+
+                var workingArea = Screen.FromPoint(cursorPosition).WorkingArea;
+                const int menuWidth = 338;
+                const int menuHeight = 510;
+                var right = Math.Max(workingArea.Left + menuWidth,
+                    Math.Min(cursorPosition.X, workingArea.Right));
+                var bottom = Math.Max(workingArea.Top + menuHeight,
+                    Math.Min(cursorPosition.Y, workingArea.Bottom));
+                trayUiProcess = Process.Start(new ProcessStartInfo
+                {
+                    FileName = uiPath,
+                    Arguments = "--tray --command-path " + QuoteArgument(trayCommandPath) +
+                        " --monitoring-state " + QuoteArgument(monitoringState) +
+                        " --x " + right + " --y " + bottom +
+                        (paused ? " --paused" : string.Empty) +
+                        (privacyMode ? " --privacy" : string.Empty),
+                    WorkingDirectory = Path.GetDirectoryName(uiPath),
+                    UseShellExecute = false
+                });
+            }
+            catch (Exception exception)
+            {
+                logger.Error("Could not open WinUI tray menu", exception);
+            }
+        }
+
+        // WinUI title bars need an .ico file rather than the in-memory
+        // NotifyIcon instance. Generate it once beside the deployed WinUI
+        // executable from the same local WeChat executable used for the tray
+        // icon; no contact data, message data, or network access is involved.
+        private void EnsureWinUiWindowIcon(string uiDirectory)
+        {
+            if (string.IsNullOrWhiteSpace(uiDirectory) || !Directory.Exists(uiDirectory))
+            {
+                return;
+            }
+
+            var destination = Path.Combine(uiDirectory, "WeChatMessageNotifier.WinUI.ico");
+            if (File.Exists(destination))
+            {
+                return;
+            }
+
+            var source = WindowsNotificationCenter.ResolveWeChatIconSourcePathForTest();
+            if (string.IsNullOrWhiteSpace(source) || !File.Exists(source))
+            {
+                return;
+            }
+
+            var temporary = destination + ".tmp";
+            try
+            {
+                using (var icon = Icon.ExtractAssociatedIcon(source))
+                {
+                    if (icon == null)
+                    {
+                        return;
+                    }
+
+                    using (var stream = new FileStream(temporary, FileMode.Create, FileAccess.Write, FileShare.None))
+                    {
+                        icon.Save(stream);
+                    }
+                }
+                File.Move(temporary, destination);
+                logger.Info("Prepared the local WeChat icon for WinUI title bars.");
+            }
+            catch (Exception exception)
+            {
+                // The UI remains usable with the packaged fallback icon when a
+                // particular WeChat installation does not expose an ICO.
+                logger.Error("Could not prepare the WinUI title-bar icon", exception);
+            }
+            finally
+            {
+                try
+                {
+                    if (File.Exists(temporary))
+                    {
+                        File.Delete(temporary);
+                    }
+                }
+                catch
+                {
+                    // A temporary icon file is harmless and can be retried next time.
+                }
+            }
+        }
+
+        private void ProcessWinUiCommand()
+        {
+            string command = null;
+            try
+            {
+                if (!File.Exists(trayCommandPath))
+                {
+                    return;
+                }
+                command = File.ReadAllText(trayCommandPath).Trim();
+                File.Delete(trayCommandPath);
+            }
+            catch (Exception exception)
+            {
+                logger.Error("Could not read WinUI tray command", exception);
+                return;
+            }
+
+            try
+            {
+                switch (command)
+                {
+                    case "open-settings": OpenSettingsWindow(); break;
+                    case "toggle-pause": TogglePause(); break;
+                    case "toggle-privacy": TogglePrivacy(); break;
+                    case "send-test": SendTestNotification(); break;
+                    case "open-notification-duration": OpenWindowsNotificationDurationSettings(); break;
+                    case "toggle-diagnostic-next": ToggleDiagnosticNext(); break;
+                    case "log-wechat-windows": monitor.LogWindowStructure(); break;
+                    case "open-settings-file": OpenSettingsFile(); break;
+                    case "open-log": OpenLogFile(); break;
+                    case "exit": Exit(); break;
+                    default: return;
+                }
+                logger.Info("Processed WinUI tray command: " + command + ".");
+            }
+            catch (Exception exception)
+            {
+                logger.Error("Could not process WinUI tray command", exception);
+            }
+        }
+
+        private void TogglePause()
+        {
+            paused = !paused;
+            pauseItem.Text = paused ? "继续监控" : "暂停监控";
+            trayIcon.Text = paused ? "微信消息提醒器（已暂停）" : "微信消息提醒器";
+            RefreshTrayStatus();
+        }
+
+        private static Icon LoadTrayIcon()
+        {
+            try
+            {
+                var source = WindowsNotificationCenter.ResolveWeChatIconSourcePathForTest();
+                if (!string.IsNullOrWhiteSpace(source) && File.Exists(source))
+                {
+                    using (var icon = Icon.ExtractAssociatedIcon(source))
+                    {
+                        if (icon != null)
+                        {
+                            return (Icon)icon.Clone();
+                        }
+                    }
+                }
+            }
+            catch
+            {
+                // The notifier remains usable on installations where WeChat
+                // is not discoverable yet; use a stable generic fallback.
+            }
+            return (Icon)SystemIcons.Information.Clone();
+        }
+
+        private void TogglePrivacy()
+        {
+            privacyMode = !privacyMode;
+            privacyItem.IsChecked = privacyMode;
+            notificationFilters.PrivacyMode = privacyMode;
+            settingsStore.Save(notificationFilters);
+        }
+
+        private void ToggleDiagnosticNext()
+        {
+            diagnosticNextItem.IsChecked = !diagnosticNextItem.IsChecked;
+        }
+
+        private void SendTestNotification()
+        {
+            notificationCenter.Show(
+                "微信消息提醒器",
+                "测试成功：Windows 系统通知工作正常。",
+                false);
+        }
+
+        private void OpenSettingsFile()
+        {
+            settingsStore.Save(notificationFilters);
+            Process.Start("notepad.exe", "\"" + settingsStore.Path + "\"");
+        }
+
+        private void OpenLogFile()
+        {
+            Process.Start("explorer.exe", "/select,\"" + logger.Path + "\"");
+        }
+
+        private void RefreshTrayStatus()
+        {
+            if (statusItem != null)
+            {
+                statusItem.Text = paused ? "状态：监控已暂停" : monitoringState;
+            }
+        }
+
         private void Poll(object sender, EventArgs eventArgs)
         {
             if (paused)
@@ -201,7 +438,13 @@ namespace WeChatMessageNotifier
             }
 
             settingsStore.ReloadIfChanged(notificationFilters);
+            if (privacyMode != notificationFilters.PrivacyMode)
+            {
+                privacyMode = notificationFilters.PrivacyMode;
+                privacyItem.IsChecked = privacyMode;
+            }
             var changes = monitor.Poll();
+            UpdateMonitoringState();
             if (changes.Count == 0)
             {
                 return;
@@ -220,12 +463,13 @@ namespace WeChatMessageNotifier
                     notificationFilters,
                     session);
                 session.Kind = decision.ResolvedKind;
-                if (diagnosticNextItem.Checked)
+                RecordActivity(session, decision);
+                if (diagnosticNextItem.IsChecked)
                 {
                     LogCandidateDiagnostic(
                         session,
                         decision);
-                    diagnosticNextItem.Checked = false;
+                    diagnosticNextItem.IsChecked = false;
                 }
 
                 if (!decision.ShouldDeliver)
@@ -259,6 +503,55 @@ namespace WeChatMessageNotifier
             }
         }
 
+        private void UpdateMonitoringState()
+        {
+            if (monitor.MainWindow == IntPtr.Zero)
+            {
+                monitoringState = "状态：未检测到微信";
+            }
+            else if (monitor.LastSessionCount <= 0)
+            {
+                monitoringState = "状态：已连接微信，未读取会话列表";
+            }
+            else
+            {
+                monitoringState = "状态：已连接微信 · " +
+                    monitor.LastSessionCount + " 个会话";
+            }
+            pollTimer.Interval = SelectPollInterval(
+                monitor.MainWindow != IntPtr.Zero,
+                monitor.LastSessionCount);
+            RefreshTrayStatus();
+        }
+
+        internal static int SelectPollInterval(
+            bool hasWeChatWindow,
+            int sessionCount)
+        {
+            return hasWeChatWindow && sessionCount > 0
+                ? ActivePollIntervalMilliseconds
+                : IdlePollIntervalMilliseconds;
+        }
+
+        private void RecordActivity(
+            ChatSession session,
+            NotificationDecision decision)
+        {
+            recentActivity.Enqueue(new NotificationActivityRecord
+            {
+                Timestamp = DateTime.Now,
+                ContactHash = session.ContactHash,
+                DetectedKind = session.DetectedKind,
+                ResolvedKind = decision.ResolvedKind,
+                Delivered = decision.ShouldDeliver,
+                Reason = decision.Reason
+            });
+            while (recentActivity.Count > RecentActivityCapacity)
+            {
+                recentActivity.Dequeue();
+            }
+        }
+
         private void HandleToastActivation(ToastActivationRequest request)
         {
             if (request == null || string.IsNullOrWhiteSpace(request.SessionKey))
@@ -280,11 +573,24 @@ namespace WeChatMessageNotifier
         {
             pollTimer.Stop();
             activationTimer.Stop();
+            uiCommandTimer.Stop();
             notificationCenter.Dispose();
+            if (settingsUiProcess != null)
+            {
+                settingsUiProcess.Dispose();
+                settingsUiProcess = null;
+            }
+            if (trayUiProcess != null)
+            {
+                trayUiProcess.Dispose();
+                trayUiProcess = null;
+            }
             trayIcon.Visible = false;
             trayIcon.Dispose();
+            trayVisualIcon.Dispose();
             pollTimer.Dispose();
             activationTimer.Dispose();
+            uiCommandTimer.Dispose();
             logger.Info("Application exited.");
             ExitThread();
         }

@@ -35,6 +35,11 @@ namespace WeChatMessageNotifier
             get { return path; }
         }
 
+        internal string BackupPath
+        {
+            get { return path + ".bak"; }
+        }
+
         internal NotificationFilterSettings Load()
         {
             try
@@ -46,12 +51,18 @@ namespace WeChatMessageNotifier
                 }
 
                 NotificationFilterSettings settings;
-                if (NotificationFilterSettings.TryParse(
-                    File.ReadAllText(path, Encoding.UTF8),
-                    out settings))
+                if (TryReadValidSettings(path, out settings))
                 {
                     lastObservedWriteTimeUtc =
                         File.GetLastWriteTimeUtc(path);
+                    return settings;
+                }
+
+                if (TryReadValidSettings(BackupPath, out settings))
+                {
+                    logger.Info(
+                        "Notification filter settings were invalid; the local backup was recovered.");
+                    lastObservedWriteTimeUtc = File.GetLastWriteTimeUtc(path);
                     return settings;
                 }
 
@@ -77,6 +88,7 @@ namespace WeChatMessageNotifier
 
         internal bool Save(NotificationFilterSettings settings)
         {
+            var temporaryPath = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
             try
             {
                 var directory = System.IO.Path.GetDirectoryName(path);
@@ -85,9 +97,30 @@ namespace WeChatMessageNotifier
                     Directory.CreateDirectory(directory);
                 }
                 File.WriteAllText(
-                    path,
+                    temporaryPath,
                     settings.ToJson(),
                     new UTF8Encoding(false));
+                if (File.Exists(path))
+                {
+                    try
+                    {
+                        // NTFS replaces the file atomically and keeps the
+                        // previous valid JSON as a recovery copy.
+                        File.Replace(temporaryPath, path, BackupPath, true);
+                    }
+                    catch (PlatformNotSupportedException)
+                    {
+                        ReplaceWithBackupFallback(temporaryPath);
+                    }
+                    catch (IOException)
+                    {
+                        ReplaceWithBackupFallback(temporaryPath);
+                    }
+                }
+                else
+                {
+                    File.Move(temporaryPath, path);
+                }
                 lastObservedWriteTimeUtc =
                     File.GetLastWriteTimeUtc(path);
                 return true;
@@ -99,6 +132,38 @@ namespace WeChatMessageNotifier
                     exception);
                 return false;
             }
+            finally
+            {
+                if (File.Exists(temporaryPath))
+                {
+                    try { File.Delete(temporaryPath); }
+                    catch { }
+                }
+            }
+        }
+
+        private bool TryReadValidSettings(
+            string candidatePath,
+            out NotificationFilterSettings settings)
+        {
+            settings = null;
+            if (string.IsNullOrWhiteSpace(candidatePath) || !File.Exists(candidatePath))
+            {
+                return false;
+            }
+
+            return NotificationFilterSettings.TryParse(
+                File.ReadAllText(candidatePath, Encoding.UTF8),
+                out settings);
+        }
+
+        private void ReplaceWithBackupFallback(string temporaryPath)
+        {
+            // This fallback is only used when File.Replace is unavailable.
+            // Preserve a readable previous file before the compatibility copy.
+            File.Copy(path, BackupPath, true);
+            File.Copy(temporaryPath, path, true);
+            File.Delete(temporaryPath);
         }
 
         internal bool ReloadIfChanged(
