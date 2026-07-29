@@ -1,5 +1,13 @@
 # Changelog
 
+## 3.1.0 - 2026-07-29
+
+- Added a separate, headless WinUI logic test runner covering launch arguments, local command writes, keyword persistence, rollback backup creation, and the responsive one/two/three-column layout thresholds.
+- Removed the retired .NET Framework settings window, activity log window, custom tray menu, visual helpers, legacy Acrylic interop, and their obsolete UI-only self-tests. The WinUI 3 settings and tray surfaces are now the only UI implementation compiled into the notifier.
+- Fixed keyword persistence for CRLF, LF, and CR-only multiline input, so each entered keyword remains a separate line after reopening Settings.
+- Save `settings.json` as readable UTF-8 Chinese text instead of JSON `\uXXXX` escapes, while retaining atomic replacement and the local rollback backup.
+- Added a bundled notifier icon used consistently by both EXEs, the desktop and Start-menu shortcuts, the tray icon, Windows notification logo, and WinUI title bars. It no longer depends on discovering an installed WeChat executable for icon extraction.
+
 ## 3.0.0 - 2026-07-23
 
 - Replaced the production WinForms settings and tray-menu path with a self-contained WinUI 3 interface, while keeping the monitor, notification delivery, keyword rules, and local settings format unchanged.

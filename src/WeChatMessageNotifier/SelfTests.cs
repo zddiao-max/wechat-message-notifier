@@ -350,97 +350,19 @@ namespace WeChatMessageNotifier
                 "The production path did not select the WinUI settings and tray surfaces.",
                 failures);
 
-            var secondary = Win11Visual.ForceOpaque(
-                System.Drawing.Color.FromArgb(64, 100, 116, 139));
-            var healthy = Win11Visual.ForceOpaque(
-                System.Drawing.Color.FromArgb(16, 22, 101, 52));
-            Expect(secondary.A == 255 && secondary.R == 100 &&
-                    secondary.G == 116 && secondary.B == 139 &&
-                    healthy.A == 255 && healthy.R == 22 &&
-                    healthy.G == 101 && healthy.B == 52,
-                "EnsureOpaqueText helper changed semantic text RGB values.", failures);
-
-            Expect(SettingsForm.UsesStableNativeTextControls &&
-                SettingsForm.UsesNoCustomCardPainting &&
-                SettingsForm.UsesFrameworkDpiAutoScale &&
-                typeof(SettingsForm).GetField(
-                    "keywordCards",
-                    BindingFlags.Instance | BindingFlags.NonPublic) == null &&
-                typeof(NativeMethods).GetMethod(
-                    "DwmExtendFrameIntoClientArea",
-                    BindingFlags.Static | BindingFlags.NonPublic) == null,
-                "Settings did not use the stable native-control/DPI rendering path.",
+            var assembly = typeof(NotifierApplicationContext).Assembly;
+            Expect(assembly.GetType("WeChatMessageNotifier.SettingsForm") == null &&
+                assembly.GetType("WeChatMessageNotifier.ActivityLogForm") == null &&
+                assembly.GetType("WeChatMessageNotifier.Win11TrayMenuForm") == null &&
+                assembly.GetType("WeChatMessageNotifier.Win11Visual") == null,
+                "Retired WinForms settings or tray UI types remained in the production assembly.",
                 failures);
 
-            Expect(NotifierApplicationContext.UsesWinUiTrayRuntime &&
-                !NotifierApplicationContext.UsesCustomTrayMenuRuntime &&
-                Win11BackdropForm.UsesStableClientErase,
-                "The backend did not keep the WinUI tray surface as its only production menu path.",
-                failures);
-
-            try
-            {
-                // Layout can briefly paint a card at a 1- or 2-pixel size.
-                // The round-rectangle helper must never pass an oversized arc
-                // to GDI+ during that transition.
-                using (var tinyPath = Win11Visual.CreateRoundRect(
-                    new System.Drawing.Rectangle(0, 0, 1, 1), 10))
-                using (var narrowPath = Win11Visual.CreateRoundRect(
-                    new System.Drawing.Rectangle(0, 0, 8, 3), 10))
-                {
-                    Expect(tinyPath.PointCount > 0 && narrowPath.PointCount > 0,
-                        "Round-rectangle fallback did not create a safe paint path.",
-                        failures);
-                }
-            }
-            catch (Exception exception)
-            {
-                Expect(false,
-                    "Round-rectangle fallback threw " + exception.GetType().Name + ".",
-                    failures);
-            }
-
-            var settingsLayoutSelfTest = SettingsForm.RunLayoutStructureSelfTest();
-            var settingsDpiSelfTest = SettingsForm.RunDpiAndEditorSelfTest();
-            var settingsSurfaceSmokeTest = SettingsForm.RunNativeSurfaceSmokeTest();
-            Expect(SettingsForm.UsesResponsiveLayout &&
-                SettingsForm.IsResizable &&
-                SettingsForm.HandlesPerMonitorDpiChanges &&
-                SettingsForm.UsesStableNativeTextControls &&
-                SettingsForm.UsesSingleConstructionPath &&
-                SettingsForm.UsesScrollableContent &&
-                SettingsForm.FooterIsOutsideScrollContent &&
-                SettingsForm.UsesTableLayoutRoot &&
-                SettingsForm.UsesOpaqueClientContainers &&
-                SettingsForm.UsesForcedDpiMetricRefresh &&
-                SettingsForm.UsesFrameworkDpiAutoScale &&
-                SettingsForm.UsesNoCustomCardPainting &&
-                SettingsForm.UsesExplicitEditableKeywordEditors &&
-                SettingsForm.UsesStableFooterButtonTable &&
-                SettingsForm.MinimumLogicalSize.Width >= 680 &&
-                SettingsForm.MinimumLogicalSize.Height >= 620 &&
-                settingsLayoutSelfTest &&
-                settingsDpiSelfTest &&
-                settingsSurfaceSmokeTest &&
-                Win11BackdropForm.ReappliesBackdropForDpiAndScreenChanges &&
-                ActivityLogForm.UsesResponsiveLayout &&
-                ActivityLogForm.HandlesPerMonitorDpiChanges &&
-                ActivityLogForm.UsesStableNativeTextControls &&
-                typeof(NativeMethods).GetMethod(
-                    "GetWindowDpiOrDefault",
-                    BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public) != null,
-                "Settings or activity window did not use the responsive, resizable layout path.",
-                failures);
-
-            Expect(typeof(NativeMethods).GetMethod(
-                    "TryApplyWindows11Acrylic",
-                    BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public) == null,
-                "The retired generic AccentPolicy path remained available.",
-                failures);
-            Expect(typeof(NativeMethods).GetMethod(
-                    "TryApplyLightTrayAcrylic",
-                    BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public) != null,
-                "The dedicated light Acrylic tray path was unavailable.",
+            var methods = BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public;
+            Expect(typeof(NativeMethods).GetMethod("TryApplySystemBackdrop", methods) == null &&
+                typeof(NativeMethods).GetMethod("TryApplyLightTrayAcrylic", methods) == null &&
+                typeof(NativeMethods).GetMethod("GetWindowDpiOrDefault", methods) == null,
+                "Legacy WinForms visual interop remained in the backend assembly.",
                 failures);
         }
 

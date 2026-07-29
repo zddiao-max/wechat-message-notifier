@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Link the production non-visual code so the checks exercise exactly
+         the parser, persistence, local command, and layout policy shipped by
+         the WinUI executable. No Windows App SDK or UI window is required. -->
+    <Compile Include="..\WeChatMessageNotifier.WinUI\SettingsDocument.cs" Link="SettingsDocument.cs" />
+    <Compile Include="..\WeChatMessageNotifier.WinUI\SettingsLaunchArguments.cs" Link="SettingsLaunchArguments.cs" />
+    <Compile Include="..\WeChatMessageNotifier.WinUI\TrayCommandStore.cs" Link="TrayCommandStore.cs" />
+    <Compile Include="..\WeChatMessageNotifier.WinUI\UiLayoutPolicy.cs" Link="UiLayoutPolicy.cs" />
+  </ItemGroup>
+</Project>

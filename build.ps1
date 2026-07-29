@@ -10,6 +10,9 @@ $outputDirectory = Join-Path $root 'outputs\WeChatMessageNotifier'
 $output = Join-Path $outputDirectory 'WeChatMessageNotifier.exe'
 $launcherOutput = Join-Path $outputDirectory 'WeChatNotifierLauncher.exe'
 $settingsUiOutputDirectory = Join-Path $outputDirectory 'SettingsUi'
+$iconDirectory = Join-Path $root 'assets'
+$notifierIcon = Join-Path $iconDirectory 'WeChatMessageNotifier.ico'
+$notifierLogo = Join-Path $iconDirectory 'WeChatMessageNotifier.png'
 $compiler = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
 $uiaClient = Join-Path $env:WINDIR 'Microsoft.NET\assembly\GAC_MSIL\UIAutomationClient\v4.0_4.0.0.0__31bf3856ad364e35\UIAutomationClient.dll'
 $uiaTypes = Join-Path $env:WINDIR 'Microsoft.NET\assembly\GAC_MSIL\UIAutomationTypes\v4.0_4.0.0.0__31bf3856ad364e35\UIAutomationTypes.dll'
@@ -24,6 +27,11 @@ $manifest = Join-Path $sourceDirectory 'app.manifest'
 $sources = Get-ChildItem -LiteralPath $sourceDirectory -Filter '*.cs' | Select-Object -ExpandProperty FullName
 $launcherSources = Get-ChildItem -LiteralPath $launcherSourceDirectory -Filter '*.cs' | Select-Object -ExpandProperty FullName
 
+if (-not (Test-Path -LiteralPath $notifierIcon) -or
+    -not (Test-Path -LiteralPath $notifierLogo)) {
+    throw 'The bundled notifier icon assets are missing from the assets directory.'
+}
+
 New-Item -ItemType Directory -Force -Path $outputDirectory | Out-Null
 
 & $compiler `
@@ -32,6 +40,7 @@ New-Item -ItemType Directory -Force -Path $outputDirectory | Out-Null
     /platform:anycpu `
     /optimize+ `
     /win32manifest:$manifest `
+    /win32icon:$notifierIcon `
     /out:$output `
     /reference:System.dll `
     /reference:System.Core.dll `
@@ -57,6 +66,7 @@ if ($LASTEXITCODE -ne 0) {
     /target:winexe `
     /platform:anycpu `
     /optimize+ `
+    /win32icon:$notifierIcon `
     /out:$launcherOutput `
     /reference:System.dll `
     /reference:System.Core.dll `
@@ -89,6 +99,12 @@ Copy-Item -LiteralPath (Join-Path $root 'LICENSE') `
     -Force
 Copy-Item -LiteralPath (Join-Path $root 'NOTICE.md') `
     -Destination (Join-Path $outputDirectory 'NOTICE.md') `
+    -Force
+Copy-Item -LiteralPath $notifierIcon `
+    -Destination (Join-Path $outputDirectory 'WeChatMessageNotifier.ico') `
+    -Force
+Copy-Item -LiteralPath $notifierLogo `
+    -Destination (Join-Path $outputDirectory 'WeChatMessageNotifier.png') `
     -Force
 
 Write-Output $output

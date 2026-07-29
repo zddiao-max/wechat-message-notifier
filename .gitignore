@@ -4,6 +4,8 @@ bin/
 obj/
 outputs/**/*.exe
 outputs/**/*.zip
+outputs/**/*.ico
+outputs/**/*.png
 outputs/WeChatMessageNotifier/SettingsUi/
 
 # Local logs and temporary files

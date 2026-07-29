@@ -12,20 +12,11 @@ namespace WeChatMessageNotifier.WinUI;
 
 public sealed partial class TrayWindow : Window
 {
-    private enum MenuLayoutMode
-    {
-        SingleColumn,
-        TwoColumns,
-        ThreeColumns
-    }
-
     private const int MenuWidth = 338;
     private const int MenuHeight = 510;
-    private const double TwoColumnBreakpoint = 620;
-    private const double ThreeColumnBreakpoint = 980;
     private readonly SettingsLaunchArguments arguments;
     private readonly AppWindow appWindow;
-    private MenuLayoutMode? menuLayoutMode;
+    private ResponsiveLayoutMode? menuLayoutMode;
 
     internal TrayWindow(SettingsLaunchArguments arguments)
     {
@@ -95,11 +86,7 @@ public sealed partial class TrayWindow : Window
     // resizing only changes their Grid positions.
     private void ApplyResponsiveMenuLayout(double availableWidth)
     {
-        var targetMode = availableWidth >= ThreeColumnBreakpoint
-            ? MenuLayoutMode.ThreeColumns
-            : availableWidth >= TwoColumnBreakpoint
-                ? MenuLayoutMode.TwoColumns
-                : MenuLayoutMode.SingleColumn;
+        var targetMode = UiLayoutPolicy.SelectTrayMode(availableWidth);
         if (menuLayoutMode == targetMode)
         {
             return;
@@ -111,7 +98,7 @@ public sealed partial class TrayWindow : Window
 
         switch (targetMode)
         {
-            case MenuLayoutMode.ThreeColumns:
+            case ResponsiveLayoutMode.ThreeColumns:
                 AddColumns(3);
                 AddRows(3);
                 PlaceElement(StatusPanel, 0, 0, 3);
@@ -123,7 +110,7 @@ public sealed partial class TrayWindow : Window
                 PlaceElement(ExitButton, 2, 2, 1);
                 break;
 
-            case MenuLayoutMode.TwoColumns:
+            case ResponsiveLayoutMode.TwoColumns:
                 AddColumns(2);
                 AddRows(5);
                 PlaceElement(StatusPanel, 0, 0, 2);

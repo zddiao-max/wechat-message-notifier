@@ -5,6 +5,7 @@ $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $sourceDirectory = Join-Path $root 'src\WeChatMessageNotifier'
 $launcherSourceDirectory = Join-Path $root 'src\WeChatNotifierLauncher'
+$winUiTestProject = Join-Path $root 'src\WeChatMessageNotifier.WinUI.Tests\WeChatMessageNotifier.WinUI.Tests.csproj'
 $outputDirectory = Join-Path $root 'work\tests'
 $output = Join-Path $outputDirectory 'WeChatMessageNotifier.Tests.exe'
 $launcherOutput = Join-Path $outputDirectory 'WeChatNotifierLauncher.Tests.exe'
@@ -71,4 +72,12 @@ if ($LASTEXITCODE -ne 0) {
 & $launcherOutput --self-test
 if ($LASTEXITCODE -ne 0) {
     throw "Launcher self-tests failed with exit code $LASTEXITCODE."
+}
+
+# These tests link the production WinUI parser, settings persistence, local
+# command bridge, and responsive-layout policy. They do not create a desktop
+# window, so they remain safe for CI and unattended local verification.
+& dotnet run --project $winUiTestProject --configuration Release --nologo
+if ($LASTEXITCODE -ne 0) {
+    throw "WinUI self-tests failed with exit code $LASTEXITCODE."
 }

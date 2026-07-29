@@ -3,8 +3,10 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Text.Json.Serialization.Metadata;
 
 namespace WeChatMessageNotifier.WinUI;
 
@@ -82,7 +84,17 @@ internal sealed class SettingsDocument
         var backupPath = path + ".bak";
         try
         {
-            var options = new JsonSerializerOptions { WriteIndented = true };
+            // JsonNode serialization on current .NET 8 runtimes requires an
+            // explicit resolver before options become read-only. Without it,
+            // saving a keyword list can throw instead of writing settings.
+            var options = new JsonSerializerOptions
+            {
+                WriteIndented = true,
+                // Settings are a local, user-editable UTF-8 file. Keep CJK
+                // keywords readable instead of emitting JSON \\uXXXX escapes.
+                Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
+                TypeInfoResolver = new DefaultJsonTypeInfoResolver()
+            };
             File.WriteAllText(temporaryPath, root.ToJsonString(options), new UTF8Encoding(false));
             if (File.Exists(path))
             {
@@ -134,9 +146,13 @@ internal sealed class SettingsDocument
     {
         var values = new JsonArray();
         var known = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var line in (text ?? string.Empty)
-            .Replace("\r", string.Empty, StringComparison.Ordinal)
-            .Split('\n'))
+        // WinUI normally supplies CRLF, but it may normalize multiline input to
+        // CR-only on some edit/paste paths.  Normalize every accepted line ending
+        // to LF before splitting so a line separator is never discarded.
+        var normalizedText = (text ?? string.Empty)
+            .Replace("\r\n", "\n", StringComparison.Ordinal)
+            .Replace("\r", "\n", StringComparison.Ordinal);
+        foreach (var line in normalizedText.Split('\n'))
         {
             var keyword = line.Trim();
             if (keyword.Length > 0 && known.Add(keyword))

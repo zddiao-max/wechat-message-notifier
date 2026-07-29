@@ -13,19 +13,10 @@ namespace WeChatMessageNotifier.WinUI;
 
 public sealed partial class SettingsWindow : Window
 {
-    private enum CardsLayoutMode
-    {
-        SingleColumn,
-        TwoColumns,
-        ThreeColumns
-    }
-
-    private const double TwoColumnBreakpoint = 960;
-    private const double ThreeColumnBreakpoint = 1320;
     private readonly SettingsLaunchArguments launchArguments;
     private readonly SettingsDocument settings;
     private readonly AppWindow appWindow;
-    private CardsLayoutMode? cardsLayoutMode;
+    private ResponsiveLayoutMode? cardsLayoutMode;
 
     internal SettingsWindow(SettingsLaunchArguments launchArguments)
     {
@@ -113,11 +104,7 @@ public sealed partial class SettingsWindow : Window
     // Grid cells; no card or editor is recreated while the user resizes.
     private void ApplyResponsiveCardsLayout(double availableWidth)
     {
-        var targetMode = availableWidth >= ThreeColumnBreakpoint
-            ? CardsLayoutMode.ThreeColumns
-            : availableWidth >= TwoColumnBreakpoint
-                ? CardsLayoutMode.TwoColumns
-                : CardsLayoutMode.SingleColumn;
+        var targetMode = UiLayoutPolicy.SelectSettingsMode(availableWidth);
         if (cardsLayoutMode == targetMode)
         {
             return;
@@ -129,7 +116,7 @@ public sealed partial class SettingsWindow : Window
 
         switch (targetMode)
         {
-            case CardsLayoutMode.ThreeColumns:
+            case ResponsiveLayoutMode.ThreeColumns:
                 AddColumns(3);
                 AddRows(1);
                 PlaceCard(ServiceKeywordsCard, 0, 0, 1);
@@ -137,7 +124,7 @@ public sealed partial class SettingsWindow : Window
                 PlaceCard(GroupKeywordsCard, 0, 2, 1);
                 break;
 
-            case CardsLayoutMode.TwoColumns:
+            case ResponsiveLayoutMode.TwoColumns:
                 AddColumns(2);
                 AddRows(2);
                 PlaceCard(ServiceKeywordsCard, 0, 0, 1);

@@ -1,6 +1,6 @@
 # WeChat Message Notifier
 
-适用于 Windows 微信 4.x 的本地消息提醒器。当前版本：**3.0.0**。
+适用于 Windows 微信 4.x 的本地消息提醒器。当前版本：**3.1.0**。
 
 程序从微信公开的 Windows UI Automation 会话列表读取联系人、消息摘要和未读状态，并仅使用 Windows 系统通知横幅和通知中心提醒。
 
@@ -48,13 +48,15 @@
 %LOCALAPPDATA%\WeChatMessageNotifier\settings.json
 ```
 
-配置修改会自动热加载。新规则使用 16 位十六进制 `ContactHash`；为兼容旧配置，已有的 8 位哈希仍可读取。保存使用 UTF-8 无 BOM。旧的 `enable*` 全局类型开关会被忽略，并在下次保存时移除。
+配置修改会自动热加载。新规则使用 16 位十六进制 `ContactHash`；为兼容旧配置，已有的 8 位哈希仍可读取。保存使用可直接阅读中文的 UTF-8 无 BOM；多行关键词兼容 CRLF、LF 与 CR 换行。旧的 `enable*` 全局类型开关会被忽略，并在下次保存时移除。
 
 设置保存采用同目录临时文件原子替换，并保留上一份有效配置为 `settings.json.bak`；主配置损坏时自动回退到该本地备份。微信未运行或未找到会话列表时，扫描频率自动降至 5 秒；已连接并读取到会话列表后恢复为约 1.5 秒。
 
 ## 诊断与隐私
 
-双击托盘图标或右键选择“打开设置…”可编辑服务号、公众号提醒关键词和群聊屏蔽关键词。v3.0 使用独立的 WinUI 3 设置与托盘界面：设置窗口优先使用 Windows 11 Mica、Per-Monitor-V2 DPI 和响应式卡片布局；托盘菜单优先使用 Windows 11 Desktop Acrylic，并可在拉宽后自动切换为一列、两列或三列。前景卡片、文字与输入框保持不透明清晰；不使用整窗透明或 `TransparencyKey`。不支持相应系统材质的 Windows 会自动回退为清晰浅色界面。托盘仍可暂停监控、启用隐私模式、发送测试通知、打开 Windows 通知时长设置，或打开高级原始设置文件与日志。
+双击托盘图标或右键选择“打开设置…”可编辑服务号、公众号提醒关键词和群聊屏蔽关键词。v3.1 使用独立的 WinUI 3 设置与托盘界面：设置窗口优先使用 Windows 11 Mica、Per-Monitor-V2 DPI 和响应式卡片布局；托盘菜单优先使用 Windows 11 Desktop Acrylic，并可在拉宽后自动切换为一列、两列或三列。前景卡片、文字与输入框保持不透明清晰；不使用整窗透明或 `TransparencyKey`。不支持相应系统材质的 Windows 会自动回退为清晰浅色界面。托盘仍可暂停监控、启用隐私模式、发送测试通知、打开 Windows 通知时长设置，或打开高级原始设置文件与日志。
+
+v3.1 将项目内置的提醒器图标用于 EXE、启动器、桌面和 Start-menu 快捷方式、托盘、Windows 通知与 WinUI 标题栏；不再从微信安装目录提取图标。
 
 诊断日志只含 `ContactHash`、检测类型、解析后类型、会话级规则、默认策略、结果和原因；不记录联系人名称或消息正文。
 
@@ -66,6 +68,8 @@
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\test.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\build.ps1
 ```
+
+`test.ps1` 会分别验证 .NET Framework 监控后端、微信启动等待器，以及 WinUI 3 界面的本地参数、设置保存、命令桥接和响应式布局策略；测试不会启动微信，也不会读取个人设置文件。
 
 构建产物：
 

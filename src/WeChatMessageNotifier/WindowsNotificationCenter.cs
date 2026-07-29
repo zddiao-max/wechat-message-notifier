@@ -66,21 +66,22 @@ namespace WeChatMessageNotifier
                 {
                     NativeMethods.SetCurrentProcessExplicitAppUserModelID(
                         AppUserModelId);
-                    var iconSourcePath = ResolveWeChatIconSourcePath();
-                    toastLogoPath = PrepareToastLogo(iconSourcePath);
-                    EnsureStartMenuShortcut(iconSourcePath);
+                    var shortcutIconPath = ResolveNotifierIconSourcePath();
+                    var toastLogoSourcePath = ResolveNotifierToastLogoSourcePath();
+                    toastLogoPath = PrepareToastLogo(toastLogoSourcePath);
+                    EnsureStartMenuShortcut(shortcutIconPath);
                     EnsureProtocolRegistration();
                     logger.Info(
-                        "Windows toast icon initialized. HasWeChatIconSource=" +
-                        (!string.IsNullOrWhiteSpace(iconSourcePath) &&
-                         File.Exists(iconSourcePath)) +
+                        "Windows toast icon initialized. HasNotifierIconSource=" +
+                        (!string.IsNullOrWhiteSpace(shortcutIconPath) &&
+                         File.Exists(shortcutIconPath)) +
                         " HasToastLogo=" +
                         (!string.IsNullOrWhiteSpace(toastLogoPath) &&
                          File.Exists(toastLogoPath)) +
                         " ToastLogoSource=" +
-                        (string.IsNullOrWhiteSpace(iconSourcePath)
+                        (string.IsNullOrWhiteSpace(toastLogoSourcePath)
                             ? "CachedOrUnavailable"
-                            : "WeChatExecutable"));
+                            : "BundledAsset"));
                 }
                 available = true;
                 logger.Info("Windows notification center integration initialized.");
@@ -270,9 +271,9 @@ namespace WeChatMessageNotifier
             return BuildFileUri(path);
         }
 
-        internal static string ResolveWeChatIconSourcePathForTest()
+        internal static string ResolveNotifierIconSourcePathForTest()
         {
-            return ResolveWeChatIconSourcePath();
+            return ResolveNotifierIconSourcePath();
         }
 
         private bool ShowToast(
@@ -511,11 +512,17 @@ namespace WeChatMessageNotifier
             if (string.IsNullOrWhiteSpace(iconSourcePath) ||
                 !File.Exists(iconSourcePath))
             {
-                // The notifier can be launched by toast activation before
-                // WeChat itself is running.  Retain the last known WeChat
-                // icon instead of replacing the notification logo with the
-                // generic notifier executable icon.
+                // Retain the previous local logo if an incomplete deployment
+                // is launched without the bundled asset.
                 return SelectExistingToastLogoForTest(null, iconPath);
+            }
+
+            if (string.Equals(
+                    Path.GetExtension(iconSourcePath),
+                    ".png",
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                return iconSourcePath;
             }
 
             try
@@ -532,7 +539,7 @@ namespace WeChatMessageNotifier
                             Environment.SpecialFolder.LocalApplicationData),
                         "WeChatMessageNotifier");
                     Directory.CreateDirectory(directory);
-                    iconPath = Path.Combine(directory, "weixin-toast-icon.png");
+                    iconPath = Path.Combine(directory, "notifier-toast-icon.png");
                     using (var bitmap = icon.ToBitmap())
                     {
                         bitmap.Save(iconPath, ImageFormat.Png);
@@ -552,86 +559,23 @@ namespace WeChatMessageNotifier
                 Environment.GetFolderPath(
                     Environment.SpecialFolder.LocalApplicationData),
                 "WeChatMessageNotifier",
-                "weixin-toast-icon.png");
+                "notifier-toast-icon.png");
         }
 
-        private static string ResolveWeChatIconSourcePath()
+        private static string ResolveNotifierIconSourcePath()
         {
-            var processPath = FindRunningWeChatProcessPath();
-            if (!string.IsNullOrWhiteSpace(processPath))
-            {
-                return processPath;
-            }
-
-            foreach (var candidate in GetCommonWeChatExecutablePaths())
-            {
-                if (!string.IsNullOrWhiteSpace(candidate) &&
-                    File.Exists(candidate))
-                {
-                    return candidate;
-                }
-            }
-
-            return null;
+            return ResolveBundledAssetPath("WeChatMessageNotifier.ico");
         }
 
-        private static string FindRunningWeChatProcessPath()
+        private static string ResolveNotifierToastLogoSourcePath()
         {
-            foreach (var processName in new[] { "Weixin", "WeChat" })
-            {
-                try
-                {
-                    foreach (var process in
-                        System.Diagnostics.Process.GetProcessesByName(
-                            processName))
-                    {
-                        using (process)
-                        {
-                            try
-                            {
-                                if (!string.IsNullOrWhiteSpace(process.MainModule.FileName) &&
-                                    File.Exists(process.MainModule.FileName))
-                                {
-                                    return process.MainModule.FileName;
-                                }
-                            }
-                            catch
-                            {
-                                // Access to another process module can be
-                                // blocked by Windows. Fall through to common
-                                // installation paths below.
-                            }
-                        }
-                    }
-                }
-                catch
-                {
-                    // Best-effort process lookup.
-                }
-            }
-
-            return null;
+            return ResolveBundledAssetPath("WeChatMessageNotifier.png");
         }
 
-        private static IEnumerable<string> GetCommonWeChatExecutablePaths()
+        private static string ResolveBundledAssetPath(string fileName)
         {
-            var programFiles = Environment.GetFolderPath(
-                Environment.SpecialFolder.ProgramFiles);
-            var programFilesX86 = Environment.GetFolderPath(
-                Environment.SpecialFolder.ProgramFilesX86);
-            var localAppData = Environment.GetFolderPath(
-                Environment.SpecialFolder.LocalApplicationData);
-            var appData = Environment.GetFolderPath(
-                Environment.SpecialFolder.ApplicationData);
-
-            yield return Path.Combine(programFiles, "Tencent", "Weixin", "Weixin.exe");
-            yield return Path.Combine(programFilesX86, "Tencent", "Weixin", "Weixin.exe");
-            yield return Path.Combine(localAppData, "Tencent", "Weixin", "Weixin.exe");
-            yield return Path.Combine(appData, "Tencent", "Weixin", "Weixin.exe");
-            yield return Path.Combine(programFiles, "Tencent", "WeChat", "WeChat.exe");
-            yield return Path.Combine(programFilesX86, "Tencent", "WeChat", "WeChat.exe");
-            yield return Path.Combine(localAppData, "Tencent", "WeChat", "WeChat.exe");
-            yield return Path.Combine(appData, "Tencent", "WeChat", "WeChat.exe");
+            var path = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, fileName);
+            return File.Exists(path) ? path : null;
         }
 
         public void Dispose()

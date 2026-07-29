@@ -2,7 +2,6 @@
 // under the direction of the project owner.
 
 using System;
-using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
 using System.IO;
@@ -46,20 +45,13 @@ namespace WeChatMessageNotifier
         private readonly Timer activationTimer;
         private readonly Timer uiCommandTimer;
         private readonly EventWaitHandle activationEvent;
-        private readonly TrayMenuEntry pauseItem;
-        private readonly TrayMenuEntry privacyItem;
-        private readonly TrayMenuEntry diagnosticNextItem;
-        private readonly TrayMenuEntry diagnosticWeChatWindowsItem;
-        private readonly TrayMenuEntry statusItem;
         private readonly NotificationFilterSettings notificationFilters;
         private readonly SettingsStore settingsStore;
         private readonly string trayCommandPath;
         private readonly Icon trayVisualIcon;
-        private readonly Queue<NotificationActivityRecord> recentActivity =
-            new Queue<NotificationActivityRecord>();
-        private const int RecentActivityCapacity = 30;
         private bool paused;
         private bool privacyMode;
+        private bool diagnosticNext;
         private bool suppressWhenWeChatForeground;
         private ToastActivationRequest pendingActivationRequest;
         private Process settingsUiProcess;
@@ -97,19 +89,6 @@ namespace WeChatMessageNotifier
             suppressWhenWeChatForeground =
                 HasArgument(args, "--suppress-foreground") &&
                 !HasArgument(args, "--notify-foreground");
-
-            pauseItem = new TrayMenuEntry("\u6682\u505c\u76d1\u63a7", delegate { TogglePause(); });
-
-            privacyItem = new TrayMenuEntry("\u9690\u79c1\u6a21\u5f0f\uff08\u4ec5\u663e\u793a\u8054\u7cfb\u4eba\uff09", delegate { TogglePrivacy(); });
-            privacyItem.IsChecked = privacyMode;
-
-            diagnosticNextItem = new TrayMenuEntry(
-                "\u4e0b\u4e00\u6b21\u63d0\u9192\u663e\u793a\u5206\u7c7b", delegate { ToggleDiagnosticNext(); });
-            diagnosticWeChatWindowsItem = new TrayMenuEntry(
-                "\u8bb0\u5f55\u5fae\u4fe1\u7a97\u53e3\u7ed3\u6784",
-                delegate { monitor.LogWindowStructure(); });
-            statusItem = new TrayMenuEntry(string.Empty, null) { Enabled = false };
-            RefreshTrayStatus();
 
             trayIcon = new NotifyIcon
             {
@@ -254,9 +233,8 @@ namespace WeChatMessageNotifier
         }
 
         // WinUI title bars need an .ico file rather than the in-memory
-        // NotifyIcon instance. Generate it once beside the deployed WinUI
-        // executable from the same local WeChat executable used for the tray
-        // icon; no contact data, message data, or network access is involved.
+        // NotifyIcon instance. Keep one bundled notifier icon beside the
+        // deployed WinUI executable so the title bars match the EXE and tray.
         private void EnsureWinUiWindowIcon(string uiDirectory)
         {
             if (string.IsNullOrWhiteSpace(uiDirectory) || !Directory.Exists(uiDirectory))
@@ -270,7 +248,7 @@ namespace WeChatMessageNotifier
                 return;
             }
 
-            var source = WindowsNotificationCenter.ResolveWeChatIconSourcePathForTest();
+            var source = WindowsNotificationCenter.ResolveNotifierIconSourcePathForTest();
             if (string.IsNullOrWhiteSpace(source) || !File.Exists(source))
             {
                 return;
@@ -279,25 +257,14 @@ namespace WeChatMessageNotifier
             var temporary = destination + ".tmp";
             try
             {
-                using (var icon = Icon.ExtractAssociatedIcon(source))
-                {
-                    if (icon == null)
-                    {
-                        return;
-                    }
-
-                    using (var stream = new FileStream(temporary, FileMode.Create, FileAccess.Write, FileShare.None))
-                    {
-                        icon.Save(stream);
-                    }
-                }
+                File.Copy(source, temporary, true);
                 File.Move(temporary, destination);
-                logger.Info("Prepared the local WeChat icon for WinUI title bars.");
+                logger.Info("Prepared the bundled notifier icon for WinUI title bars.");
             }
             catch (Exception exception)
             {
-                // The UI remains usable with the packaged fallback icon when a
-                // particular WeChat installation does not expose an ICO.
+                // The UI remains usable with its default window icon if a
+                // deployment is missing the bundled notifier ICO.
                 logger.Error("Could not prepare the WinUI title-bar icon", exception);
             }
             finally
@@ -361,24 +328,19 @@ namespace WeChatMessageNotifier
         private void TogglePause()
         {
             paused = !paused;
-            pauseItem.Text = paused ? "继续监控" : "暂停监控";
             trayIcon.Text = paused ? "微信消息提醒器（已暂停）" : "微信消息提醒器";
-            RefreshTrayStatus();
         }
 
         private static Icon LoadTrayIcon()
         {
             try
             {
-                var source = WindowsNotificationCenter.ResolveWeChatIconSourcePathForTest();
+                var source = WindowsNotificationCenter.ResolveNotifierIconSourcePathForTest();
                 if (!string.IsNullOrWhiteSpace(source) && File.Exists(source))
                 {
-                    using (var icon = Icon.ExtractAssociatedIcon(source))
+                    using (var icon = new Icon(source))
                     {
-                        if (icon != null)
-                        {
-                            return (Icon)icon.Clone();
-                        }
+                        return (Icon)icon.Clone();
                     }
                 }
             }
@@ -393,14 +355,13 @@ namespace WeChatMessageNotifier
         private void TogglePrivacy()
         {
             privacyMode = !privacyMode;
-            privacyItem.IsChecked = privacyMode;
             notificationFilters.PrivacyMode = privacyMode;
             settingsStore.Save(notificationFilters);
         }
 
         private void ToggleDiagnosticNext()
         {
-            diagnosticNextItem.IsChecked = !diagnosticNextItem.IsChecked;
+            diagnosticNext = !diagnosticNext;
         }
 
         private void SendTestNotification()
@@ -422,14 +383,6 @@ namespace WeChatMessageNotifier
             Process.Start("explorer.exe", "/select,\"" + logger.Path + "\"");
         }
 
-        private void RefreshTrayStatus()
-        {
-            if (statusItem != null)
-            {
-                statusItem.Text = paused ? "状态：监控已暂停" : monitoringState;
-            }
-        }
-
         private void Poll(object sender, EventArgs eventArgs)
         {
             if (paused)
@@ -441,7 +394,6 @@ namespace WeChatMessageNotifier
             if (privacyMode != notificationFilters.PrivacyMode)
             {
                 privacyMode = notificationFilters.PrivacyMode;
-                privacyItem.IsChecked = privacyMode;
             }
             var changes = monitor.Poll();
             UpdateMonitoringState();
@@ -463,13 +415,12 @@ namespace WeChatMessageNotifier
                     notificationFilters,
                     session);
                 session.Kind = decision.ResolvedKind;
-                RecordActivity(session, decision);
-                if (diagnosticNextItem.IsChecked)
+                if (diagnosticNext)
                 {
                     LogCandidateDiagnostic(
                         session,
                         decision);
-                    diagnosticNextItem.IsChecked = false;
+                    diagnosticNext = false;
                 }
 
                 if (!decision.ShouldDeliver)
@@ -521,7 +472,6 @@ namespace WeChatMessageNotifier
             pollTimer.Interval = SelectPollInterval(
                 monitor.MainWindow != IntPtr.Zero,
                 monitor.LastSessionCount);
-            RefreshTrayStatus();
         }
 
         internal static int SelectPollInterval(
@@ -531,25 +481,6 @@ namespace WeChatMessageNotifier
             return hasWeChatWindow && sessionCount > 0
                 ? ActivePollIntervalMilliseconds
                 : IdlePollIntervalMilliseconds;
-        }
-
-        private void RecordActivity(
-            ChatSession session,
-            NotificationDecision decision)
-        {
-            recentActivity.Enqueue(new NotificationActivityRecord
-            {
-                Timestamp = DateTime.Now,
-                ContactHash = session.ContactHash,
-                DetectedKind = session.DetectedKind,
-                ResolvedKind = decision.ResolvedKind,
-                Delivered = decision.ShouldDeliver,
-                Reason = decision.Reason
-            });
-            while (recentActivity.Count > RecentActivityCapacity)
-            {
-                recentActivity.Dequeue();
-            }
         }
 
         private void HandleToastActivation(ToastActivationRequest request)
